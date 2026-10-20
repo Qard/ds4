@@ -12,8 +12,10 @@
     X(moe,T*DS4_N_MOE_LATENT) X(logits,T*DS4_N_VOCAB)
 
 typedef struct {
-    uint32_t pos, kv_highwater, ctx_cap, cap_tokens;
-    bool valid;
+    uint32_t pos, kv_highwater, swa_history_start, ctx_cap, cap_tokens;
+    bool valid, cancelled;
+    ds4_session_cancel_fn cancel;
+    void *cancel_ud;
 #define MUSE_FIELD(field,count) ds4_gpu_tensor *field;
     MUSE_GRAPH_SCRATCH(MUSE_FIELD)
 #undef MUSE_FIELD
@@ -22,7 +24,7 @@ typedef struct {
 } ds4_muse_gpu_graph;
 
 static uint32_t muse_graph_cache_cap(unsigned layer,uint32_t context,uint32_t cap) {
-    return g_muse_swa[layer] ? MIN((uint64_t)context,(uint64_t)DS4_N_SWA+cap-1) : context;
+    return g_muse_swa[layer] ? MIN((uint64_t)context,(uint64_t)DS4_N_SWA+cap) : context;
 }
 
 static DS4_MAYBE_UNUSED uint64_t muse_graph_bytes(uint32_t context,uint32_t cap) {
@@ -81,6 +83,7 @@ static bool muse_norm(ds4_gpu_tensor *out,const ds4_gpu_tensor *x,const ds4_mode
 
 static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_model *m,const ds4_weights *w,
         const int *tokens,uint32_t T,float *out,bool all_rows) {
+    if (g) g->cancelled=false;
     if (!g || !g->valid || !T || T>g->cap_tokens || g->pos>g->ctx_cap || T>g->ctx_cap-g->pos) return false;
     for(unsigned t=0;t<T;t++) if(tokens[t]<0 || (unsigned)tokens[t]>=DS4_N_VOCAB) return false;
     if (!ds4_gpu_tensor_write(g->tokens,0,tokens,(uint64_t)T*4) || !ds4_gpu_begin_commands()) return false;
@@ -88,6 +91,11 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
         w->token_embd->abs_offset,w->token_embd->type,DS4_N_VOCAB,T,DS4_N_EMBD) &&
         ds4_gpu_rms_norm_plain_rows_tensor(g->r,g->r,DS4_N_EMBD,T,DS4_RMS_EPS);
     for(unsigned il=0;ok && il<DS4_N_LAYER;il++) {
+        if (g->cancel && g->cancel(g->cancel_ud)) {
+            g->cancelled=true;
+            ok=false;
+            break;
+        }
         const ds4_layer_weights *l=&w->layer[il];
         ok=muse_norm(g->xn,g->r,m,l->attn_norm,T,DS4_N_EMBD) &&
             muse_gemv(g->q,m,l->attn_q,g->xn,T) && muse_gemv(g->k,m,l->attn_k,g->xn,T) &&

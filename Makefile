@@ -745,7 +745,7 @@ test-qwen4-cuda: tests/test_qwen4_cuda
 	./tests/test_qwen4_cuda
 endif
 
-ds4.o: ds4.c ds4_muse_graph.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h ds4_gpu_copy.h ds4_gpu_tp.h ds4_deepseek41_gpu.h ds4_deepseek41_dspark.h ds4_linux_memory.h ds4_engram.h
+ds4.o: ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h ds4_gpu_copy.h ds4_gpu_tp.h ds4_deepseek41_gpu.h ds4_deepseek41_dspark.h ds4_linux_memory.h ds4_engram.h
 	$(CC) $(CFLAGS) -c -o $@ ds4.c
 
 ds4_image.o: ds4_image.c ds4_image.h third_party/iris/jpeg.h third_party/iris/png.h
@@ -811,7 +811,7 @@ rax.o: rax.c rax.h rax_malloc.h
 linenoise.o: linenoise.c linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ linenoise.c
 
-ds4_cpu.o: ds4.c ds4_muse_graph.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h ds4_gpu_tp.h
+ds4_cpu.o: ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h ds4_gpu_tp.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -c -o $@ ds4.c
 
 ds4_cli_cpu.o: ds4_cli.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_prompt_prefix.h linenoise.h
@@ -1452,7 +1452,7 @@ tests/test_muse_experts: tests/test_muse_experts.c ds4_muse_gpu.h $(CORE_OBJS)
 test-muse-experts: tests/test_muse_experts
 	./tests/test_muse_experts
 
-tests/test_muse_graph.o: tests/test_muse_graph.c ds4.c ds4_muse_graph.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h
+tests/test_muse_graph.o: tests/test_muse_graph.c ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h
 	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -I. -c -o $@ $<
 
 tests/test_muse_graph: tests/test_muse_graph.o $(filter-out ds4.o,$(CORE_OBJS))
@@ -1471,3 +1471,23 @@ tests/test_muse_tokenizer: tests/test_muse_tokenizer.o ds4_engram.c $(filter-out
 .PHONY: test-muse-tokenizer
 test-muse-tokenizer: tests/test_muse_tokenizer
 	uv run --script tests/muse_tokenizer_reference.py ./tests/test_muse_tokenizer
+
+tests/test_muse_session.o: tests/test_muse_session.c ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4.h
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -I. -c -o $@ $<
+
+tests/test_muse_session: tests/test_muse_session.o $(filter-out ds4.o,$(CORE_OBJS))
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $^ $(METAL_LDLIBS)
+
+.PHONY: test-muse-session
+test-muse-session: tests/test_muse_session
+	uv run --script tests/muse_session_reference.py ./tests/test_muse_session
+
+tests/test_muse_memory.o: tests/test_muse_memory.c ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4.h
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -I. -c -o $@ $<
+
+tests/test_muse_memory: tests/test_muse_memory.o $(filter-out ds4.o,$(CORE_OBJS))
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $^ $(METAL_LDLIBS)
+
+.PHONY: test-muse-memory
+test-muse-memory: tests/test_muse_memory
+	uv run --script tests/muse_memory_reference.py ./tests/test_muse_memory

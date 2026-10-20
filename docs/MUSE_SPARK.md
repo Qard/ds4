@@ -4,9 +4,12 @@
 
 The intended execution path is the native `ds4` C/Metal engine, using its
 bounded SSD expert cache. Native tensor loading, attention, routing, residuals,
-expert execution, and the whole-model graph pass bounded reference tests.
-**Full-checkpoint native generation, session support, and throughput are not yet
-validated. Native inference is disabled until graph integration is complete.**
+expert execution, and the whole-model graph pass bounded reference tests. Native
+sessions also pass prefix reuse, rewinds, cancellation, conversation isolation,
+and disk KV roundtrips across prefill capacities. Memory admission reserves
+resident weights, per-session KV and scratch, and the bounded expert cache.
+**Full-checkpoint native generation and throughput are not yet validated.
+Native inference is disabled until graph and conversation integration are complete.**
 
 ## Download for native ds4
 

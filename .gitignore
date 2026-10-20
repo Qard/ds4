@@ -124,3 +124,5 @@ __pycache__/
 /tests/test_muse_experts
 /tests/test_muse_graph
 /tests/test_muse_tokenizer
+/tests/test_muse_session
+/tests/test_muse_memory

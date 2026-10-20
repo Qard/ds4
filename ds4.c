@@ -54,6 +54,7 @@
 #define DS4_HAS_QWEN4_GPU 1
 #ifdef __APPLE__
 #define DS4_HAS_QWEN4_METAL 1
+#define DS4_HAS_MUSE_METAL 1
 #endif
 #endif
 #if defined(DS4_ROCM_BUILD) || (!defined(__APPLE__) && !defined(DS4_NO_GPU))
@@ -5023,25 +5024,11 @@ static bool tensor_is_routed_expert_type(uint32_t type) {
            type == DS4_TENSOR_MXFP4;
 }
 
-static DS4_MAYBE_UNUSED uint64_t routed_expert_block_bytes(uint32_t type) {
-    switch (type) {
-    case DS4_TENSOR_Q8_0:    return 34;
-    case DS4_TENSOR_IQ2_XXS: return sizeof(block_iq2_xxs);
-    case DS4_TENSOR_Q2_K:    return sizeof(block_q2_K);
-    case DS4_TENSOR_Q4_K:    return sizeof(block_q4_K);
-    case DS4_TENSOR_Q5_K:    return sizeof(block_q5_K);
-    case DS4_TENSOR_Q6_K:    return sizeof(block_q6_K);
-    case DS4_TENSOR_MXFP4:   return sizeof(block_mxfp4);
-    default:                 ds4_die("unsupported routed expert tensor type");
-    }
-    return 0;
-}
-
 static DS4_MAYBE_UNUSED uint64_t routed_expert_row_bytes(const ds4_tensor *t) {
     const gguf_type_info *info = tensor_type(t->type);
     if (!info || info->block_elems == 0) ds4_die("unsupported routed expert tensor type");
     if ((t->dim[0] % info->block_elems) != 0) ds4_die("routed expert row is not quant block aligned");
-    return (t->dim[0] / info->block_elems) * routed_expert_block_bytes(t->type);
+    return (t->dim[0] / info->block_elems) * info->block_bytes;
 }
 
 static bool streaming_layer_routed_expert_bytes(
@@ -43343,6 +43330,7 @@ typedef enum {
 struct ds4_engine {
     char *model_path;
     uint64_t ds41_session_bytes;
+    uint64_t muse_session_bytes,muse_reserved_graph_bytes;
     ds4_model model;
     ds4_model mtp_model;
     ds4_model vision_model;
@@ -61391,6 +61379,11 @@ struct ds4_session {
     ds41_gpu_graph ds41_graph;
     bool ds41_graph_ready;
 #endif
+#ifdef DS4_HAS_MUSE_METAL
+    ds4_muse_gpu_graph muse_graph;
+    bool muse_graph_ready,muse_rewound;
+    uint64_t muse_allocation_bytes;
+#endif
     ds4_gpu_graph graph;
     ds4_glm_gpu_graph glm_graph;
     bool glm_graph_ready;
@@ -62463,6 +62456,13 @@ static bool ds4_session_is_glm(const ds4_session *s) {
 static bool ds4_session_is_qwen4(const ds4_session *s) {
     return s && s->engine && ds4_model_is_qwen4();
 }
+
+static bool ds4_session_is_muse(const ds4_session *s) {
+    return s && s->engine && DS4_MODEL_FAMILY==DS4_MODEL_FAMILY_MUSE_SPARK;
+}
+#ifdef DS4_HAS_MUSE_METAL
+#include "ds4_muse_session.inc"
+#endif
 
 #ifndef DS4_NO_GPU
 static void ds4_session_glm_reset_dense_cache(ds4_session *s) {
@@ -63724,7 +63724,14 @@ static int ds41_load_payload(ds4_session *s, FILE *fp, const uint32_t *h,
 static uint64_t qwen4_payload_tensor_bytes(uint32_t rows, uint32_t mtp_rows);
 #endif
 
+#ifdef DS4_HAS_MUSE_METAL
+#include "ds4_muse_payload.inc"
+#endif
+
 uint64_t ds4_session_payload_bytes(ds4_session *s) {
+#ifdef DS4_HAS_MUSE_METAL
+    if (s && !s->distributed && ds4_session_is_muse(s)) return muse_session_payload_bytes(s);
+#endif
     if (s && !s->distributed && ds4_session_is_qwen4(s)) {
 #ifndef DS4_HAS_QWEN4_GPU
         return 0;
@@ -64117,6 +64124,9 @@ int ds4_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t errlen)
     if (s->distributed) {
         return ds4_dist_session_save_payload(s->distributed, s, fp, err, errlen);
     }
+#ifdef DS4_HAS_MUSE_METAL
+    if (ds4_session_is_muse(s)) return muse_session_save_payload(s, fp, err, errlen);
+#endif
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (ds4_session_is_ds41(s)) return ds41_save_payload(s, fp, err, errlen);
 #endif
@@ -64504,6 +64514,9 @@ int ds4_session_load_payload(ds4_session *s, FILE *fp, uint64_t payload_bytes, c
         ds4_tokens_free(&tokens);
         return rc;
     }
+#ifdef DS4_HAS_MUSE_METAL
+    if (ds4_session_is_muse(s)) return muse_session_load_payload(s, fp, h, remaining, err, errlen);
+#endif
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (ds4_session_is_ds41(s)) return ds41_load_payload(s, fp, h, remaining, err, errlen);
 #endif
@@ -65839,7 +65852,7 @@ static bool ds4_session_greedy_splitkv_replay_exact(
 
 int ds4_session_eval_argmax(ds4_session *s, int token, char *err, size_t errlen) {
     if (!s) return -1;
-    if (ds4_session_is_cpu(s) || ds4_session_is_glm(s) || ds4_session_is_ds41(s)) {
+    if (ds4_session_is_cpu(s) || ds4_session_is_glm(s) || ds4_session_is_ds41(s) || ds4_session_is_muse(s)) {
         if (ds4_session_eval(s, token, err, errlen) != 0) return -1;
         return ds4_session_argmax(s);
     }
@@ -74452,6 +74465,7 @@ static int ds4_session_tp_register(ds4_session *s) {
 int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
     if (!out || !e || ctx_size <= 0) return 1;
     if (e->backend == DS4_BACKEND_CPU) {
+        if (DS4_MODEL_FAMILY==DS4_MODEL_FAMILY_MUSE_SPARK) return 1;
         if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
             fprintf(stderr, "ds4: GLM sessions currently require a graph backend\n");
             return 1;
@@ -74488,6 +74502,20 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
     ds4_session *s = xcalloc(1, sizeof(*s));
     s->engine = e;
     s->ctx_size = ctx_size;
+#ifdef DS4_HAS_MUSE_METAL
+    if(ds4_session_is_muse(s)) {
+        uint32_t cap=muse_session_prefill_cap(e,(uint32_t)ctx_size);
+        uint64_t bytes=muse_session_memory_bytes(ctx_size,cap);
+        if(ctx_size>1048576 || !muse_memory_admit(e,ds4_add_sat_u64(e->muse_session_bytes,bytes),false) ||
+            !muse_graph_alloc(&s->muse_graph,ctx_size,cap)) {free(s);return 1;}
+        s->muse_graph_ready=true;s->muse_allocation_bytes=bytes;
+        e->muse_session_bytes+=bytes;s->prefill_cap=cap;
+        s->logits=xmalloc((size_t)DS4_N_VOCAB*sizeof(float));
+        s->sample_probs=xmalloc((size_t)DS4_N_VOCAB*sizeof(float));
+        *out=s;return 0;
+    }
+#endif
+
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41) {
         if (ctx_size > 1048576 ||
@@ -74958,6 +74986,13 @@ void ds4_session_free(ds4_session *s) {
     }
 #ifndef DS4_NO_GPU
     else {
+#ifdef DS4_HAS_MUSE_METAL
+        if(ds4_session_is_muse(s)) {
+            if(s->engine) s->engine->muse_session_bytes-=s->muse_allocation_bytes;
+            muse_graph_free(&s->muse_graph);
+        } else
+#endif
+
 #ifdef DS4_HAS_DEEPSEEK41_GPU
         if (s->ds41_graph_ready) {
             s->engine->ds41_session_bytes -= s->ds41_graph.allocation_bytes;
@@ -76949,6 +76984,9 @@ static int ds4_session_sync_internal(ds4_session *s, const ds4_tokens *prompt, c
                                      err,
                                      errlen);
     }
+#ifdef DS4_HAS_MUSE_METAL
+    if(ds4_session_is_muse(s)) return muse_session_sync(s,prompt,err,errlen);
+#endif
 #ifdef DS4_HAS_QWEN4_GPU
     if (ds4_session_is_qwen4(s)) {
         ds4_engine *e = s->engine;
@@ -78120,13 +78158,22 @@ int ds4_session_common_prefix(ds4_session *s, const ds4_tokens *prompt) {
     return i;
 }
 
+static bool ds4_session_logits_ready(const ds4_session *s) {
+    if(!s || !s->checkpoint_valid || !s->logits) return false;
+#ifdef DS4_HAS_MUSE_METAL
+    if(ds4_session_is_muse(s)) return s->muse_graph_ready && s->muse_graph.valid &&
+        !s->muse_rewound && s->muse_graph.pos==(uint32_t)s->checkpoint.len;
+#endif
+    return true;
+}
+
 int ds4_session_argmax(ds4_session *s) {
-    if (!s || !s->checkpoint_valid || !s->logits) return -1;
+    if (!ds4_session_logits_ready(s)) return -1;
     return sample_argmax(s->logits, DS4_N_VOCAB);
 }
 
 int ds4_session_argmax_excluding(ds4_session *s, int excluded_id) {
-    if (!s || !s->checkpoint_valid || !s->logits) return -1;
+    if (!ds4_session_logits_ready(s)) return -1;
     if (getenv("DS4_CPU_DISABLE_UNROLLED_ARGMAX") == NULL) {
         return argmax_f32_excluding_unrolled8(
                 s->logits, DS4_N_VOCAB, excluded_id);
@@ -78146,7 +78193,7 @@ int ds4_session_argmax_excluding(ds4_session *s, int excluded_id) {
 
 int ds4_session_argmax_ignoring_eos(ds4_session *s,
                                     ds4_think_mode think_mode) {
-    if (!s || !s->checkpoint_valid || !s->logits) return -1;
+    if (!ds4_session_logits_ready(s)) return -1;
     int best = -1;
     float best_logit = DS4_NEG_INF;
     for (uint32_t i = 0; i < DS4_N_VOCAB; i++) {
@@ -78175,12 +78222,13 @@ int ds4_sample_logits(const float *logits, int n_vocab, float temperature,
 }
 
 int ds4_session_sample(ds4_session *s, float temperature, int top_k, float top_p, float min_p, uint64_t *rng) {
-    if (!s || !s->checkpoint_valid || !s->logits) return -1;
+    if (!ds4_session_logits_ready(s)) return -1;
     return sample_top_p_min_p(s->logits, DS4_N_VOCAB, temperature, top_k,
                               top_p, min_p, rng, s->sample_probs);
 }
 
 int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
+    if(ds4_session_is_muse(s) && !ds4_session_logits_ready(s)) return 0;
     if (!s || !out || k <= 0) return 0;
     if (k > (int)DS4_N_VOCAB) k = (int)DS4_N_VOCAB;
     for (int i = 0; i < k; i++) {
@@ -78218,6 +78266,7 @@ int ds4_session_top_logprobs(ds4_session *s, ds4_token_score *out, int k) {
 }
 
 int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
+    if(ds4_session_is_muse(s) && !ds4_session_logits_ready(s)) return 0;
     if (!s || !out || token < 0 || token >= (int)DS4_N_VOCAB) return 0;
 
     float max_logit = DS4_NEG_INF;
@@ -78240,6 +78289,7 @@ int ds4_session_token_logprob(ds4_session *s, int token, ds4_token_score *out) {
 }
 
 int ds4_session_copy_logits(ds4_session *s, float *out, int cap) {
+    if(ds4_session_is_muse(s) && !ds4_session_logits_ready(s)) return 0;
     if (!s || !out || cap < (int)DS4_N_VOCAB) return 0;
     memcpy(out, s->logits, (size_t)DS4_N_VOCAB * sizeof(out[0]));
     return (int)DS4_N_VOCAB;
@@ -79136,6 +79186,7 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
     }
     if (ds4_session_is_cpu(s)) {
         ds4_engine *e = s->engine;
+
         forward_token_raw_swa_cpu_decode_scratch(s->logits,
                                                  &e->model,
                                                  &e->weights,
@@ -79161,6 +79212,10 @@ static int ds4_session_eval_internal(ds4_session *s, int token, bool probe_mtp,
     return 1;
 #else
     ds4_engine *e = s->engine;
+#ifdef DS4_HAS_MUSE_METAL
+    if(ds4_session_is_muse(s)) return muse_session_eval(s,token,err,errlen);
+#endif
+
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (ds4_session_is_ds41(s)) {
         ds41_dspark *d = s->ds41_graph.dspark;
@@ -80858,6 +80913,7 @@ static bool ds4_sessions_eval_batch_metal_supported(
         ds4_decode_item *items,
         int count,
         ds4_engine *e) {
+    if (DS4_MODEL_FAMILY==DS4_MODEL_FAMILY_MUSE_SPARK) return false;
     const char *tp_batch = getenv("DS4_METAL_TP_SESSION_BATCH");
     if (!items || count < 2 || !e || e->backend != DS4_BACKEND_METAL ||
         e->support_kind != DS4_SUPPORT_NONE ||
@@ -87456,6 +87512,9 @@ void ds4_session_invalidate(ds4_session *s) {
 #ifdef DS4_HAS_DEEPSEEK41_GPU
     if (s->ds41_graph_ready) ds41_graph_reset(&s->ds41_graph);
 #endif
+#ifdef DS4_HAS_MUSE_METAL
+    if(s->muse_graph_ready) muse_session_reset_graph(s);
+#endif
     ds4_session_glm_reset_dense_cache(s);
 #endif
 }
@@ -87611,6 +87670,12 @@ void ds4_session_rewind(ds4_session *s, int pos) {
     }
     bool state_ok = false;
 #ifndef DS4_NO_GPU
+#ifdef DS4_HAS_MUSE_METAL
+    if(s->checkpoint_valid && ds4_session_is_muse(s)) {
+        if(!muse_graph_seek(&s->muse_graph,(uint32_t)pos)) muse_session_reset_graph(s);
+        s->muse_rewound=true;state_ok=true;
+    }
+#endif
 #ifdef DS4_HAS_QWEN4_GPU
     if (s->checkpoint_valid && ds4_session_is_qwen4(s)) {
         /* a verify snapshot can restore the verified block's start (the
