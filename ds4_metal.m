@@ -50806,6 +50806,9 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
         fprintf(stderr,"ds4: Muse SSD cache must hold at least %u experts\n",slots);
         return 0;
     }
+    /* Reuse the shared frequency-cache aging clock. Its first-layer guard
+     * counts a decoded token once, so prefill hotness can decay as topics shift. */
+    if (tokens == 1) ds4_gpu_stream_expert_cache_note_token(layer);
     /* Splitting a prefill keeps every selected expert inside explicit cache
      * buffers, including when a user requests a very small cache. No mapped
      * expert-bank overflow is permitted on this path. */

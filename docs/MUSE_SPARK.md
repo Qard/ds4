@@ -85,7 +85,9 @@ mapped as a cache-overflow fallback.
 Single-token decode starts selected-expert reads after routing and overlaps
 them with the independent latent projection, using ds4's existing pread pool.
 Pending reads are joined before expert dispatch and on graph failure. Prefill
-uses the bounded batch loader.
+uses the bounded batch loader. Single-token execution also advances ds4's
+existing frequency-cache aging clock once per decoded token, so accumulated
+prefill popularity decays as the conversation moves to new topics.
 
 Admission reserves fixed weights, per-session KV and scratch, a safety margin,
 and the expert cache. It also measures currently available host memory before

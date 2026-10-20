@@ -4,10 +4,12 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 int main(void) {
+    assert(!setenv("DS4_METAL_STREAMING_EXPERT_TIMING_SUMMARY","1",1));
     enum { D=64, F=64, E=4, S=2, T=3, BANK=E*D*F*4, SIZE=4*BANK };
     FILE *file = tmpfile();
     assert(file && ftruncate(fileno(file),SIZE)==0);
@@ -79,6 +81,21 @@ int main(void) {
         for(unsigned i=0;i<T*D;i++) assert(fabs(actual[i]-expected[i])<3e-5);
         if(streamed) assert(ds4_gpu_stream_expert_cache_current_count()<=S);
     }
+    /* The shared frequency cache ages once per decoded token, independently
+     * of routed layer count. Batched prefill above must not advance it. */
+    for(unsigned token=0;token<19;token++) for(unsigned layer=0;layer<2;layer++) {
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,layer));
+        assert(ds4_gpu_synchronize());
+        assert(ds4_gpu_stream_expert_cache_current_count()<=S);
+    }
+    FILE *report=tmpfile();assert(report);fflush(stderr);
+    int saved_stderr=dup(STDERR_FILENO);assert(saved_stderr>=0);
+    assert(dup2(fileno(report),STDERR_FILENO)>=0);
+    ds4_gpu_print_memory_report("Muse cache aging regression");fflush(stderr);
+    assert(dup2(saved_stderr,STDERR_FILENO)>=0);close(saved_stderr);
+    rewind(report);char text[16384]={0};assert(fread(text,1,sizeof(text)-1,report)>0);fclose(report);
+    if(!strstr(text,"aging tokens=19 first_layer=0 decay_token=17")) fputs(text,stderr);
+    assert(strstr(text,"aging tokens=19 first_layer=0 decay_token=17"));
     ds4_gpu_tensor_free(x); ds4_gpu_tensor_free(selected); ds4_gpu_tensor_free(mid);
     ds4_gpu_tensor_free(part); ds4_gpu_tensor_free(w); ds4_gpu_tensor_free(out);
     ds4_gpu_cleanup(); munmap(map,SIZE); fclose(file);
