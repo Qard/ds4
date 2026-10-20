@@ -22,6 +22,10 @@ def compare_runs(baseline, candidate, tolerance):
     """Compare every vocabulary logit, rejecting mismatched teacher prefixes."""
     left = json.loads((baseline / 'summary.json').read_text())['cases']
     right = json.loads((candidate / 'summary.json').read_text())['cases']
+    if not left or not right:
+        raise ValueError('empty case summary')
+    if len({c['name'] for c in left})!=len(left) or len({c['name'] for c in right})!=len(right):
+        raise ValueError('duplicate case names')
     if [c['name'] for c in left] != [c['name'] for c in right]:
         raise ValueError('case lists differ')
     results = []

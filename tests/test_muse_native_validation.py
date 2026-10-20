@@ -29,6 +29,13 @@ class NativeValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'continuation'):
                 compare_runs(a, b, .002)
 
+    def test_empty_summary_cannot_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            (root/'summary.json').write_text('{"cases": []}')
+            with self.assertRaisesRegex(ValueError,'empty'):
+                compare_runs(root,root,.002)
+
     def test_bad_artifacts_fail(self):
         for bad in ('nonfinite', 'truncated', 'drift', 'prompt', 'partialbyte'):
             with self.subTest(bad=bad), tempfile.TemporaryDirectory() as tmp:

@@ -18,6 +18,7 @@ import sys
 import termios
 import time
 import pyte
+from agent_trace_text import generated_code_text
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--binary", type=Path, default=Path("./ds4-agent"))
@@ -32,7 +33,14 @@ parser.add_argument("--dspark", type=Path)
 parser.add_argument("--output", type=Path, required=True)
 parser.add_argument("--interrupt-only", action="store_true",
                     help="check generation interruption and same-session tool recovery")
+parser.add_argument("--model-family", choices=("legacy", "muse"), default="legacy")
+parser.add_argument("--prefill-chunk", type=int)
+parser.add_argument("--cache-experts", type=int)
+parser.add_argument("--timeout", type=float, default=360,
+                    help="per-turn wait; SSD-streamed models may need a larger value")
 args = parser.parse_args()
+if args.timeout <= 0 or (args.prefill_chunk is not None and args.prefill_chunk <= 0) or (args.cache_experts is not None and args.cache_experts <= 0):
+    parser.error("timeouts and optional cache/prefill sizes must be positive")
 root = args.binary.resolve().parent
 out = args.output.resolve()
 out.mkdir(parents=True, exist_ok=False)
@@ -47,6 +55,10 @@ cmd = [str(args.binary.resolve()), "-m", str(args.model.resolve()),
        "--ctx", str(args.ctx), "--think" if args.think else "--nothink",
        "--temp", "0", "--tokens", str(args.tokens),
        "--seed", "12345", "--chdir", str(project), "--trace", str(trace)]
+if args.prefill_chunk:
+    cmd += ["--prefill-chunk", str(args.prefill_chunk)]
+if args.cache_experts:
+    cmd += ["--ssd-streaming-cache-experts", str(args.cache_experts)]
 if args.vision:
     cmd += ["--vision", str(args.vision.resolve())]
 if args.ssd_streaming:
@@ -97,7 +109,8 @@ def collect(seconds=0.2):
     if proc.poll() is not None:
         raise RuntimeError("agent exited " + str(proc.returncode))
 
-def wait(pred, label, timeout=360):
+def wait(pred, label, timeout=None):
+    if timeout is None: timeout = args.timeout
     t0 = time.monotonic()
     while time.monotonic()-t0 < timeout:
         collect()
@@ -150,7 +163,7 @@ def new():
     wait(idle,"new completed")
 
 try:
-    wait(lambda: "tokens label=initial_system_prompt" in tr() and idle(), "ready", 240)
+    wait(lambda: "tokens label=initial_system_prompt" in tr() and idle(), "ready", max(240,args.timeout))
     syslen = int(re.search(r"tokens label=initial_system_prompt start=0 len=(\d+)", tr())[1])
     print("system tokens", syslen, flush=True)
     if args.interrupt_only:
@@ -249,10 +262,7 @@ try:
             match = re.search(r" token index=\d+ id=\d+ .* hex=([0-9a-f]*)$", line)
             if match:
                 output.extend(bytes.fromhex(match[1]))
-    response = output.decode()
-    if args.think:
-        assert "</think>" in response, "thinking did not finish"
-        response = response.split("</think>", 1)[1]
+    response = generated_code_text(output.decode(), args.think, args.model_family)
     code = re.sub(r"```(?:c)?\n?", "", response)
     (project / "generated.c").write_text(code)
     oracle = project / "oracle.c"

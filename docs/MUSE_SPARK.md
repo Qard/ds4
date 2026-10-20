@@ -137,3 +137,38 @@ independent full-checkpoint reference, coherent generation and live tool-cycle
 checks, or sustained memory and throughput measurements with the automatic
 cache budget. Paired-session validation timings include duplicate decoding,
 snapshots and rewind work; they are not single-session throughput benchmarks.
+
+## Preparing the complete live test sequence
+
+Preparation does not open a checkpoint or start an inference process:
+
+```sh
+python3 tests/muse_prepare_validation.py --output /tmp/muse-live-prepared
+```
+
+The new directory contains deterministic benchmark text, its SHA-256, structured
+commands, and a runbook. It uses the existing native `ds4-bench`, `ds4-server`,
+and `ds4-agent` binaries. Execute its stages sequentially when unified memory
+is available. The API client is the only process that runs alongside its server.
+
+The sequence covers context frontiers 1024/2048/4096/8192, bounded and automatic
+expert caches, prefill chunks 32/128, teacher-forced continuations, and full-logit
+comparisons with `tests/muse_compare_frontiers.py`. API checks cover OpenAI,
+Anthropic and Responses text/streaming output, literal `<think>` text, reasoning
+channels, and named tool calls/results. The lookup tool returns a random token
+without executing code. A separate run after restarting the server requires a
+cache hit on its first request, with separate traces retained across restart.
+Agent tests cover interruption, actual tools in an isolated test project,
+compaction, saved-session restoration, context exhaustion, and recovery. They
+run with reasoning disabled and enabled.
+
+A different model is useful for regression testing shared ds4 facilities; its
+logits cannot be a numerical reference for Muse. The independent NumPy Muse
+reference now covers complete small graphs with F32 weights or Q8 projections
+and IQ2_XXS experts, including GQA, sliding-window rollover and expert eviction.
+It derives expected values without invoking ds4's kernels or quant decoder.
+The packed fixture uses deliberately constructed codebook entries and independent
+sign/scale arithmetic; the separate packed-expert tests exercise arbitrary grid
+indices. Full-checkpoint checks still compare ds4 execution paths against each
+other; independently generated full-checkpoint golden logits are not included.
+No additional production runner is required by this test sequence.
