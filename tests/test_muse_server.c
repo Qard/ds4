@@ -2,6 +2,7 @@
 #define DS4_SERVER_TEST_NO_MAIN
 #include "../ds4_server.c"
 #include <assert.h>
+extern ds4_engine *ds4_test_muse_tokenizer_engine(const char *path);
 static void test_muse_render(void) {
     chat_msgs msgs={0};
     chat_msg system={.role=xstrdup("system"),.content=xstrdup("Be concise.")};chat_msgs_push(&msgs,system);
@@ -91,4 +92,14 @@ static void test_muse_semantic_sse(void) {
         openai_stream_free(&oa);anthropic_stream_free(&an);responses_stream_free(&re);request_free(&r);
     }
 }
-int main(void) {test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();puts("Muse server prompt and ATEM roundtrip: PASS");}
+static void test_muse_model_listing(ds4_engine *engine) {
+    assert(server_model_alias_known("muse-spark-open"));
+    int sv[2];assert(socketpair(AF_UNIX,SOCK_STREAM,0,sv)==0);
+    server s={.engine=engine,.ctx_size=8192,.default_tokens=512};
+    assert(send_models(&s,sv[0]));shutdown(sv[0],SHUT_WR);
+    char *wire=read_socket_text(sv[1]);
+    assert(strstr(wire,"\"id\":\"muse-spark-open\""));
+    assert(!strstr(wire,"deepseek-v4-flash") && !strstr(wire,"deepseek-v4-pro"));
+    free(wire);close(sv[0]);close(sv[1]);
+}
+int main(int argc,char **argv) {assert(argc==2);ds4_engine *engine=ds4_test_muse_tokenizer_engine(argv[1]);test_muse_model_listing(engine);test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();ds4_engine_close(engine);puts("Muse server prompt, model listing and ATEM roundtrip: PASS");}

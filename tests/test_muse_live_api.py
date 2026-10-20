@@ -53,6 +53,11 @@ class LiveHttpHarnessTests(unittest.TestCase):
         received=[]
         class Handler(BaseHTTPRequestHandler):
             def log_message(self,*args): pass
+            def do_GET(self):
+                result={'id':'muse-spark-open'}
+                if self.path=='/v1/models':result={'data':[result]}
+                payload=json.dumps(result).encode();self.send_response(200)
+                self.send_header('Content-Length',str(len(payload)));self.end_headers();self.wfile.write(payload)
             def do_POST(self):
                 body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                 received.append(body)
@@ -108,7 +113,9 @@ class LiveHttpHarnessTests(unittest.TestCase):
                     '--with-reasoning','--require-initial-cache'],check=True,capture_output=True,timeout=20)
                 summary=json.loads((out/'summary.json').read_text())
                 self.assertEqual(summary['status'],'PASS')
-                self.assertEqual(len(summary['requests']),19)
+                self.assertTrue((out/'models.response').exists())
+                self.assertTrue((out/'model-detail.response').exists())
+                self.assertEqual(len(summary['requests']),21)
                 self.assertEqual(len(received),19)
         finally:
             server.shutdown();server.server_close();thread.join()

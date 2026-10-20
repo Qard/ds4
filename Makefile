@@ -1509,7 +1509,7 @@ tests/test_muse_decode: tests/test_muse_decode.o ds4_engram.o $(filter-out ds4_c
 tests/test_muse_server.o: tests/test_muse_server.c ds4_server.c ds4.h ds4_muse_server_render.inc ds4_muse_server_parse.inc ds4_muse_server_stream.inc
 	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
 
-tests/test_muse_server: tests/test_muse_server.o ds4_help.o ds4_kvstore.o rax.o ds4_engram.o $(CPU_CORE_OBJS)
+tests/test_muse_server: tests/test_muse_server.o tests/muse_tokenizer_engine.o ds4_help.o ds4_kvstore.o rax.o ds4_engram.o $(filter-out ds4_cpu.o,$(CPU_CORE_OBJS))
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 .PHONY: test-muse-chat test-muse-server test-muse-engine
@@ -1517,7 +1517,7 @@ test-muse-chat: tests/test_muse_chat tests/test_muse_decode
 	uv run --script tests/muse_chat_reference.py ./tests/test_muse_chat ./tests/test_muse_decode
 
 test-muse-server: tests/test_muse_server
-	./tests/test_muse_server
+	uv run --script tests/muse_frontend_reference.py ./tests/test_muse_server
 
 test-muse-engine: ds4
 	uv run --script tests/muse_engine_reference.py ./ds4

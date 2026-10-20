@@ -8,6 +8,7 @@ import argparse
 import json
 import time
 import urllib.request
+import urllib.parse
 import uuid
 from pathlib import Path
 
@@ -114,6 +115,21 @@ class LiveClient:
     def __init__(self,url,output,timeout):
         self.url=url.rstrip('/');self.output=output;self.timeout=timeout;self.results=[]
 
+    def metadata(self,model):
+        for name,path in (('models','/v1/models'),
+                          ('model-detail','/v1/models/'+urllib.parse.quote(model,safe=''))):
+            (self.output/f'{name}.request.json').write_text(json.dumps({'method':'GET','path':path})+'\n')
+            start=time.monotonic()
+            with urllib.request.urlopen(self.url+path,timeout=self.timeout) as response:
+                payload=response.read()
+            (self.output/f'{name}.response').write_bytes(payload)
+            result=json.loads(payload)
+            if name=='models':
+                if model not in [item['id'] for item in result['data']]:
+                    raise ValueError(f'loaded model list does not advertise {model}')
+            elif result.get('id')!=model:raise ValueError('model detail ID differs')
+            self.results.append({'name':name,'seconds':time.monotonic()-start})
+
     def call(self,name,api,body):
         (self.output/f'{name}.request.json').write_text(json.dumps(body,indent=2)+'\n')
         req=urllib.request.Request(self.url+ENDPOINTS[api],data=json.dumps(body).encode(),
@@ -156,6 +172,7 @@ def main():
             for api in args.api},'reasoning':args.with_reasoning,'require_initial_cache':args.require_initial_cache},indent=2));return
     args.output.mkdir(parents=True,exist_ok=False)
     client=LiveClient(args.url,args.output,args.timeout)
+    client.metadata(args.model)
     for api in args.api:
         body=request_body(api,args.model,plain)
         response=client.call(f'{api}-plain',api,body)
