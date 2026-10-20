@@ -9,8 +9,8 @@ adapters are implemented. Small independent fixtures exercise numerical
 correctness and the conversation protocol.
 
 **Real-checkpoint startup, short generation, full-vocabulary prefill consistency,
-and KV round trips pass. Long-context, live frontend, sustained memory and
-throughput validation are in progress. This branch is not yet production-ready.**
+KV round trips, live APIs and agent interruption/tool recovery pass. Long-context
+compaction, sustained memory and throughput validation are in progress. This branch is not yet production-ready.**
 Builds and bounded fixture tests run independently of the downloaded checkpoint.
 
 ## Download
@@ -47,7 +47,7 @@ The native command to validate once sufficient memory is available is:
 
 ```sh
 ./ds4 --model ~/.ds4/models/muse-spark-open-native.gguf --metal \
-  --ctx 4096 --prefill-chunk 32 --tokens 128 -p 'Hello'
+  --ctx 4096 --prefill-chunk 32 --nothink --tokens 256 -p 'Hello'
 ```
 
 Muse selects SSD expert streaming automatically. The standard `ds4-server` and
@@ -231,3 +231,38 @@ the first vocabulary vector in the native `raw.logits.f32`, rather than a vector
 after generated continuation tokens. Close resident model processes for an
 uncontended comparison. This calculation is intentionally slow and independent
 of the native Metal execution path.
+
+The corrected native chat framing was revalidated on the full checkpoint at
+prefill chunks 1 and 32: all vocabulary logits, snapshots, paired decoding and
+rewinds again matched exactly. Live OpenAI Chat Completions, Anthropic Messages
+and Responses checks passed plain text, streaming, literal tag preservation and
+tool round trips. Streamed tool names and arguments passed in all three formats.
+The first request after restarting the server restored all 155 prompt tokens
+from disk. The server held about 84 GiB resident with its automatic expert cache.
+
+The real agent processed its 1341-token system prompt, interrupted generation in
+0.92 seconds, and then used `bash` to create and read the requested test file.
+Its recovery prefills reused 1449 and 1604 tokens. The CLI also returned only the
+requested `CLI_OK` with a 512-token prefill setting and private output disabled.
+A sampled high-effort arithmetic request returned `323` with its reasoning on a
+separate stream. The earlier strict-code-phrase high-effort sample produced an
+incorrect refusal; it remains a failed quality probe.
+
+The independent four-token checkpoint calculation agreed on the top ten tokens
+and had logit cosine similarity 0.9999903, maximum error 0.087874 and RMS error
+0.017334. Layer traces locate the first routing difference at layer 45: the
+native eighth/ninth scores are separated by 4.1e-7. Residual maximum error was
+0.000512 at layer 44 and jumped to 0.029175 after that selection. NumPy selected
+the same experts as Metal when given Metal's router logits. A controlled tail
+calculation starting from the independent layer-44 residual and holding native
+expert choices fixed reduced final maximum/RMS logit error to 0.002533/0.000566
+and increased cosine similarity to 0.999999991. This isolates a near-tie routing
+change under different FP32 reductions and FP16 KV rounding; it is not an exact
+independent golden-logit pass. Native chunk/session consistency remains exact.
+
+Build `tests/test_muse_checkpoint_trace` to repeat the per-layer diagnostic with
+`MODEL PROMPT_IDS NEW_OUTPUT_DIRECTORY`. Its observer is compiled only into the
+test binary. It saves residuals, normalized FFN inputs, router logits, selected
+experts, queries and FP16 keys. Adding the observer preserved all native final
+logits exactly. `muse_checkpoint_reference.py --trace-directory NEW_DIRECTORY`
+saves the corresponding independent values.
