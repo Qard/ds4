@@ -494,10 +494,10 @@ static const char *glm_graph_env_value(const char *rocm_name,
 
 enum {
     DS4_MAX_LAYER            = 79,
-    DS4_MAX_EMBD             = 7168,
+    DS4_MAX_EMBD             = 8192,
     DS4_MAX_VOCAB            = 248320,
     DS4_MAX_HEAD             = 128,
-    DS4_MAX_HEAD_KV          = 2,
+    DS4_MAX_HEAD_KV          = 16,
     DS4_MAX_HEAD_DIM         = 576,
     DS4_MAX_VALUE_DIM        = 512,
     DS4_MAX_ROT              = 64,
@@ -507,9 +507,9 @@ enum {
     DS4_MAX_EXPERT           = 512,
     DS4_MAX_EXPERT_USED      = 10,
     DS4_MAX_EXPERT_SHARED    = 1,
-    DS4_MAX_FF_EXP           = 3072,
+    DS4_MAX_FF_EXP           = 4096,
     DS4_MAX_HASH_LAYER       = 3,
-    DS4_MAX_SWA              = 128,
+    DS4_MAX_SWA              = 2048,
     DS4_MAX_INDEXER_HEAD     = 64,
     DS4_MAX_INDEXER_HEAD_DIM = 128,
     DS4_MAX_INDEXER_TOP_K    = 2048,
@@ -527,6 +527,7 @@ typedef enum {
     DS4_MODEL_FAMILY_GLM_DSA   = 1,
     DS4_MODEL_FAMILY_DEEPSEEK41 = 2,
     DS4_MODEL_FAMILY_QWEN4_EXP = 3,
+    DS4_MODEL_FAMILY_MUSE_SPARK = 4,
 } ds4_model_family;
 
 typedef enum {
@@ -537,6 +538,7 @@ typedef enum {
     DS4_VARIANT_FLASH41 = 4,
     DS4_VARIANT_QWEN4_EXP = 5,
     DS4_VARIANT_QWEN4_MINI = 6,
+    DS4_VARIANT_MUSE_SPARK = 7,
 } ds4_variant;
 
 typedef struct {
@@ -559,6 +561,7 @@ typedef struct {
     uint32_t n_expert_shared;
     uint32_t n_ff_exp;
     uint32_t n_ff_dense;
+    uint32_t n_moe_latent;
     uint32_t n_hash_layer;
     uint32_t n_swa;
     uint32_t n_indexer_head;
@@ -598,6 +601,17 @@ typedef struct {
     float kda_gate_lower_bound;
     uint64_t rope_orig_ctx;
 } ds4_shape;
+
+static const ds4_shape DS4_SHAPE_MUSE_SPARK = {
+    .name = "Muse Spark Open 816B-A42B",
+    .family = DS4_MODEL_FAMILY_MUSE_SPARK, .variant = DS4_VARIANT_MUSE_SPARK,
+    .n_layer = 62, .n_embd = 8192, .n_vocab = 202048,
+    .n_head = 128, .n_head_kv = 16, .n_head_dim = 64, .n_value_dim = 64,
+    .n_rot = 64, .n_expert = 256, .n_expert_used = 8,
+    .n_ff_exp = 4096, .n_moe_latent = 4096, .n_swa = 2048,
+    .rms_eps = 1e-5f, .expert_weight_scale = 1.f, .rope_freq_base = 500000.f,
+};
+static uint32_t g_muse_swa[DS4_MAX_LAYER];
 
 static const ds4_shape DS4_SHAPE_FLASH = {
     .name = "DeepSeek V4 Flash",
@@ -937,6 +951,7 @@ static uint32_t g_ds4_compress_ratios[DS4_MAX_LAYER] = {0};
 #define DS4_N_EXPERT_USED             (g_ds4_shape.n_expert_used)
 #define DS4_N_EXPERT_SHARED           (g_ds4_shape.n_expert_shared)
 #define DS4_N_FF_EXP                  (g_ds4_shape.n_ff_exp)
+#define DS4_N_MOE_LATENT              (g_ds4_shape.n_moe_latent)
 #define DS4_N_FF_DENSE                (g_ds4_shape.n_ff_dense)
 #define DS4_N_HASH_LAYER              (g_ds4_shape.n_hash_layer)
 #define DS4_N_SWA                     (g_ds4_shape.n_swa)
@@ -4675,6 +4690,11 @@ typedef struct {
     ds4_tensor *engram_kv;
     ds4_tensor *engram_q_norm;
     ds4_tensor *engram_k_norm;
+    /* Muse uses learned residual gains and a narrower MoE latent space. */
+    ds4_tensor *attn_gate, *attn_resid_alpha, *attn_resid_beta;
+    ds4_tensor *ffn_resid_alpha, *ffn_resid_beta, *ffn_post_norm;
+    ds4_tensor *ffn_latent_down, *ffn_latent_up;
+    ds4_tensor *ffn_pre_exp_norm, *ffn_post_exp_norm;
     /* Qwen3.8-Flash-Next */
     ds4_tensor *hc_attn_norm;
     ds4_tensor *hc_attn_down;
@@ -5346,7 +5366,8 @@ static void tensor_expect_routed_expert(
 
 static bool weights_have_output_head(const ds4_weights *w) {
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ||
-        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41) {
+        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41 ||
+        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
         return w && w->output_norm && w->output;
     }
     if (ds4_model_is_qwen4()) {
@@ -5362,7 +5383,8 @@ static bool weights_have_output_head(const ds4_weights *w) {
 
 static bool weights_have_partial_output_head(const ds4_weights *w) {
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ||
-        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41) {
+        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41 ||
+        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
         return w && (w->output_norm || w->output);
     }
     if (ds4_model_is_qwen4()) {
@@ -5639,8 +5661,79 @@ static void weights_validate_qwen4_layout(
     }
 }
 
+/* Norm deltas, Q scale, and router scale are already folded by the GGUF
+ * converter. No weight rewriting is performed when the native model opens. */
+#define MUSE_LAYER_TENSORS(X) \
+    X(attn_norm, "attn_norm.weight", 0, 1, DS4_N_EMBD, 0, 0) \
+    X(attn_q, "attn_q.weight", 1, 2, DS4_N_EMBD, DS4_N_HEAD*DS4_N_HEAD_DIM, 0) \
+    X(attn_k, "attn_k.weight", 1, 2, DS4_N_EMBD, DS4_N_HEAD_KV*DS4_N_HEAD_DIM, 0) \
+    X(attn_v, "attn_v.weight", 1, 2, DS4_N_EMBD, DS4_N_HEAD_KV*DS4_N_VALUE_DIM, 0) \
+    X(attn_output, "attn_output.weight", 1, 2, DS4_N_HEAD*DS4_N_VALUE_DIM, DS4_N_EMBD, 0) \
+    X(attn_gate, "attn_gate.weight", 1, 2, DS4_N_EMBD, DS4_N_HEAD*DS4_N_VALUE_DIM, 0) \
+    X(attn_q_norm, "attn_q_norm.weight", 0, 1, DS4_N_HEAD_DIM, 0, 0) \
+    X(attn_k_norm, "attn_k_norm.weight", 0, 1, DS4_N_HEAD_DIM, 0, 0) \
+    X(attn_resid_alpha, "attn_resid_alpha.weight", 0, 1, DS4_N_EMBD, 0, 0) \
+    X(attn_resid_beta, "attn_resid_beta.weight", 0, 1, DS4_N_EMBD, 0, 0) \
+    X(ffn_norm, "ffn_norm.weight", 0, 1, DS4_N_EMBD, 0, 0) \
+    X(ffn_post_norm, "post_ffw_norm.weight", 0, 1, DS4_N_EMBD, 0, 0) \
+    X(ffn_resid_alpha, "ffn_resid_alpha.weight", 0, 1, DS4_N_EMBD, 0, 0) \
+    X(ffn_resid_beta, "ffn_resid_beta.weight", 0, 1, DS4_N_EMBD, 0, 0) \
+    X(ffn_gate_inp, "ffn_gate_inp.weight", 1, 2, DS4_N_EMBD, DS4_N_EXPERT, 0) \
+    X(ffn_exp_probs_b, "exp_probs_b.bias", 0, 1, DS4_N_EXPERT, 0, 0) \
+    X(ffn_latent_down, "ffn_latent_down.weight", 1, 2, DS4_N_EMBD, DS4_N_MOE_LATENT, 0) \
+    X(ffn_latent_up, "ffn_latent_up.weight", 1, 2, DS4_N_MOE_LATENT, DS4_N_EMBD, 0) \
+    X(ffn_pre_exp_norm, "ffn_pre_exp_norm.weight", 0, 1, DS4_N_MOE_LATENT, 0, 0) \
+    X(ffn_post_exp_norm, "ffn_post_exp_norm.weight", 0, 1, DS4_N_MOE_LATENT, 0, 0) \
+    X(ffn_gate_exps, "ffn_gate_exps.weight", 2, 3, DS4_N_MOE_LATENT, DS4_N_FF_EXP, DS4_N_EXPERT) \
+    X(ffn_up_exps, "ffn_up_exps.weight", 2, 3, DS4_N_MOE_LATENT, DS4_N_FF_EXP, DS4_N_EXPERT) \
+    X(ffn_down_exps, "ffn_down_exps.weight", 2, 3, DS4_N_FF_EXP, DS4_N_MOE_LATENT, DS4_N_EXPERT)
+
+static bool weights_muse_layer_has_required(const ds4_layer_weights *l) {
+#define MUSE_PRESENT(field, suffix, kind, rank, d0, d1, d2) if (!l->field) return false;
+    MUSE_LAYER_TENSORS(MUSE_PRESENT)
+#undef MUSE_PRESENT
+    return true;
+}
+
+static void tensor_expect_muse_layout(const ds4_tensor *t, unsigned kind,
+        unsigned rank, uint64_t d0, uint64_t d1, uint64_t d2) {
+    /* The initial published release has F32 norms, Q6_K/Q8/F32 projections,
+     * and IQ2_XXS experts. Other supported GGUF packs use the same graph. */
+    if (!t) ds4_die("required Muse tensor missing");
+    bool supported = kind == 0 ? t->type == DS4_TENSOR_F32 :
+        t->type == DS4_TENSOR_F32 || t->type == DS4_TENSOR_F16 ||
+        t->type == DS4_TENSOR_BF16 || t->type == DS4_TENSOR_Q8_0 ||
+        t->type == DS4_TENSOR_Q6_K || t->type == DS4_TENSOR_Q4_K ||
+        t->type == DS4_TENSOR_Q4_0 || t->type == DS4_TENSOR_Q2_K ||
+        t->type == DS4_TENSOR_IQ2_XXS;
+    if (!supported) ds4_die("unsupported Muse tensor quantization");
+    tensor_expect_layout(t, t->type, rank, d0, d1, d2);
+}
+
+static void weights_validate_muse_layout(const ds4_weights *w, uint32_t start,
+        uint32_t end, bool embedding, bool output) {
+    if (start >= DS4_N_LAYER) ds4_die("invalid Muse first layer");
+    if (end == UINT32_MAX) end = DS4_N_LAYER - 1;
+    if (end < start || end >= DS4_N_LAYER) ds4_die("invalid Muse layer range");
+    if (embedding || w->token_embd)
+        tensor_expect_muse_layout(w->token_embd, 1, 2, DS4_N_EMBD, DS4_N_VOCAB, 0);
+    if (output || weights_have_partial_output_head(w)) {
+        tensor_expect_muse_layout(w->output_norm, 0, 1, DS4_N_EMBD, 0, 0);
+        tensor_expect_muse_layout(w->output, 1, 2, DS4_N_EMBD, DS4_N_VOCAB, 0);
+    }
+    for (unsigned il = start; il <= end; il++) {
+        const ds4_layer_weights *l = &w->layer[il];
+#define MUSE_VALIDATE(field, suffix, kind, rank, d0, d1, d2) \
+        tensor_expect_muse_layout(l->field, kind, rank, d0, d1, d2);
+        MUSE_LAYER_TENSORS(MUSE_VALIDATE)
+#undef MUSE_VALIDATE
+    }
+}
+
 static bool weights_layer_has_required(const ds4_layer_weights *l, uint32_t il) {
     if (!l) return false;
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK)
+        return weights_muse_layer_has_required(l);
     if (ds4_model_is_qwen4()) {
         return weights_qwen4_layer_has_required(l, il);
     }
@@ -5891,6 +5984,10 @@ static void weights_validate_layout(
         uint32_t           layer_end,
         bool               require_token_embd,
         bool               require_output) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+        weights_validate_muse_layout(w, layer_start, layer_end, require_token_embd, require_output);
+        return;
+    }
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
         weights_validate_glm_dsa_layout(w,
                                         layer_start,
@@ -7153,10 +7250,47 @@ static void config_validate_qwen4_model(const ds4_model *m) {
     }
 }
 
+static void config_validate_muse_model(const ds4_model *m) {
+    g_ds4_shape = DS4_SHAPE_MUSE_SPARK;
+    memset(g_ds4_compress_ratios, 0, sizeof(g_ds4_compress_ratios));
+    const struct { const char *key; uint32_t value; } ints[] = {
+        {"block_count", DS4_N_LAYER}, {"embedding_length", DS4_N_EMBD},
+        {"context_length", 1048576}, {"attention.head_count", DS4_N_HEAD},
+        {"attention.head_count_kv", DS4_N_HEAD_KV}, {"attention.key_length", DS4_N_HEAD_DIM},
+        {"attention.value_length", DS4_N_VALUE_DIM}, {"expert_count", DS4_N_EXPERT},
+        {"expert_used_count", DS4_N_EXPERT_USED}, {"expert_feed_forward_length", DS4_N_FF_EXP},
+        {"moe_latent_size", DS4_N_MOE_LATENT}, {"attention.sliding_window", DS4_N_SWA},
+        {"expert_gating_func", 2},
+    };
+    char key[128];
+    for (unsigned i = 0; i < sizeof(ints)/sizeof(ints[0]); i++) {
+        snprintf(key, sizeof(key), "muse-spark.%s", ints[i].key);
+        config_expect_u32(key, required_u32(m, key), ints[i].value);
+    }
+    const struct { const char *key; float value; } floats[] = {
+        {"attention.layer_norm_rms_epsilon", 1e-5f}, {"post_norm_epsilon", 1e-8f},
+        {"rope.freq_base", 500000.f}, {"rope.freq_base_swa", 500000.f},
+        {"logit_scale", .1767766953f}, {"final_logit_softcapping", 20.f},
+        {"expert_weights_scale", 1.f},
+    };
+    for (unsigned i = 0; i < sizeof(floats)/sizeof(floats[0]); i++) {
+        snprintf(key, sizeof(key), "muse-spark.%s", floats[i].key);
+        config_expect_epsilon(key, required_f32(m, key), floats[i].value);
+    }
+    config_expect_bool("muse-spark.expert_weights_norm",
+                       required_bool(m, "muse-spark.expert_weights_norm"), true);
+    for (unsigned i = 0; i < DS4_N_LAYER; i++) g_muse_swa[i] = (i % 4 != 1);
+    config_expect_u32_array(m, "muse-spark.attention.sliding_window_pattern", g_muse_swa, DS4_N_LAYER);
+}
+
 static void config_validate_model(const ds4_model *m) {
     g_ds4_flash_vision_exp = false;
     ds4_str arch = {0};
     if (model_get_string(m, "general.architecture", &arch)) {
+        if (ds4_streq(arch, "muse-spark")) {
+            config_validate_muse_model(m);
+            return;
+        }
         if (ds4_streq(arch, "deepseek41")) {
             config_validate_deepseek41_model(m);
             return;
@@ -7662,7 +7796,8 @@ static void weights_bind_output(
             w->output         = model_find_tensor(m, "output.weight");
         }
     } else if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA ||
-        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41) {
+        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41 ||
+        DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
 
         if (required) {
             w->output_norm = required_tensor(m, "output_norm.weight");
@@ -7826,6 +7961,13 @@ static void weights_bind_qwen4_layer(ds4_layer_weights *l, const ds4_model *m, u
 }
 
 static void weights_bind_layer(ds4_layer_weights *l, const ds4_model *m, uint32_t il) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+#define MUSE_BIND(field, suffix, kind, rank, d0, d1, d2) \
+        l->field = required_tensorf(m, "blk.%u." suffix, il);
+        MUSE_LAYER_TENSORS(MUSE_BIND)
+#undef MUSE_BIND
+        return;
+    }
     if (ds4_model_is_qwen4()) {
         weights_bind_qwen4_layer(l, m, il);
         return;
@@ -8041,6 +8183,14 @@ static void model_map_span_vec_include_one(ds4_model_map_span_vec *spans, const 
 }
 
 static void model_map_span_vec_include_layer(ds4_model_map_span_vec *spans, const ds4_layer_weights *l) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+#define MUSE_SPAN(field, suffix, kind, rank, d0, d1, d2) \
+        model_map_span_vec_include_one(spans, l->field);
+        MUSE_LAYER_TENSORS(MUSE_SPAN)
+#undef MUSE_SPAN
+        return;
+    }
+
 #define DS4_INCLUDE_TENSOR(t_) model_map_span_vec_include_one(spans, (t_))
     DS4_INCLUDE_TENSOR(l->hc_attn_fn);
     DS4_INCLUDE_TENSOR(l->hc_attn_scale);
@@ -8149,6 +8299,14 @@ static void model_map_span_vec_include_layer(ds4_model_map_span_vec *spans, cons
 }
 
 static void model_map_span_vec_include_layer_decode_static(ds4_model_map_span_vec *spans, const ds4_layer_weights *l) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+#define MUSE_SPAN(field, suffix, kind, rank, d0, d1, d2) \
+        if (kind != 2) model_map_span_vec_include_one(spans, l->field);
+        MUSE_LAYER_TENSORS(MUSE_SPAN)
+#undef MUSE_SPAN
+        return;
+    }
+
 #define DS4_INCLUDE_TENSOR(t_) model_map_span_vec_include_one(spans, (t_))
     DS4_INCLUDE_TENSOR(l->hc_attn_fn);
     DS4_INCLUDE_TENSOR(l->hc_attn_scale);
@@ -71859,6 +72017,12 @@ static int ds4_engine_open_internal(ds4_engine **out,
         return 1;
     }
     config_validate_model(&e->model);
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK && !opt->inspect_only) {
+        fprintf(stderr, "ds4: native Muse graph integration is under implementation\n");
+        ds4_engine_close(e);
+        *out = NULL;
+        return 1;
+    }
     if (ds4_model_is_qwen4() && !opt->inspect_only) {
         const bool backend_ok =
 #ifdef DS4_HAS_QWEN4_GPU

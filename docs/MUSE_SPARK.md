@@ -1,22 +1,44 @@
-# Experimental Muse Spark Open on a 128 GB Mac
+# Native Muse Spark Open integration
 
 [README](../README.md)
 
-This branch adds `ds4-muse`, a text-only runner with explicit SSD expert reads
-and a byte-bounded cache. It uses MLX-LM's existing Muse graph for attention,
-routing, normalization, residuals, and KV state, replacing only expert execution
-and weight loading.
+The intended execution path is the native `ds4` C/Metal engine, using its
+bounded SSD expert cache. Native loading and graph primitives are being added.
+**Full-model native generation, session support, and throughput are not yet
+validated. Native inference is disabled until graph integration is complete.**
 
-**Status: small-model inference and a real 816B-checkpoint expert are tested on
-an M5 Max. Full 816B generation and useful throughput are not verified.**
-The test machine had 128 GiB RAM and approximately 331 GiB free storage; the
-selected checkpoint needs approximately 346 GiB. No full checkpoint was downloaded.
+## Download for native ds4
 
-This is an experimental entry point inside the fork, not a native C/Metal port.
-`ds4`, `ds4-server`, and `ds4-agent` retain their existing model support. There is
-no Muse server, integrated tool execution, vision, audio, or speculative decoding
-yet. The CLI uses Muse's chat template and emits its text stream, including any
-reasoning/protocol markers the tokenizer preserves.
+```sh
+./download_model.sh muse-gguf --dry-run
+./download_model.sh muse-gguf
+```
+
+The default destination is `~/.ds4/models/muse-spark-open-native.gguf`.
+Use `--output /path/to/model.gguf` to change it. Rerun the same command to resume.
+The download is pinned to revision `c00670568b6ce5e56a247f67091247984df2a01e` of
+[`unsloth/Muse-Spark-Open-816B-A42B-GGUF`](https://huggingface.co/unsloth/Muse-Spark-Open-816B-A42B-GGUF),
+using its `UD-IQ2_XXS` split. The published weights retain their original bytes;
+joining rewrites only GGUF metadata and tensor offsets. No requantization occurs.
+
+The checkpoint is approximately 210 GiB. Allow another 47 GiB for one staged
+shard, plus free-space headroom. Each complete shard is checked against its
+published SHA-256, copied into the final layout, fsynced with a resume journal,
+and then removed from this downloader's private staging directory. Interrupted
+shard downloads resume through Hugging Face Hub; an interrupted join restarts
+from the last committed shard. Existing final outputs are never overwritten.
+`HF_TOKEN` is honored by Hugging Face Hub. `uv` installs the download dependencies
+in an isolated environment; native inference does not depend on Python or MLX.
+
+The earlier MLX checkpoint at `~/.ds4/models/muse-spark-open` uses a different
+weight format and cannot be passed to the native GGUF loader.
+
+## Reference runner (experimental)
+
+The initial `ds4-muse` MLX runner remains temporarily for numerical reference.
+Small-model inference and a real checkpoint expert were tested on an M5 Max;
+full 816B generation and useful throughput were not verified. This reference
+runner does not establish native ds4 support.
 
 ## Running
 

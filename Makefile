@@ -832,7 +832,7 @@ ds4_eval_cpu.o: ds4_eval.c ds4_eval_cases.h ds4.h ds4_ssd.h ds4_distributed.h ds
 ds4_agent_cpu.o: ds4_agent.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_prompt_prefix.h ds4_kvstore.h ds4_web.h linenoise.h
 	$(CC) $(CFLAGS) -DDS4_NO_GPU -c -o $@ ds4_agent.c
 
-ds4_metal.o: ds4_metal.m ds4.h ds4_gpu.h ds4_gpu_tp.h ds4_deepseek41_gpu.h ds4_image.h $(METAL_SRCS)
+ds4_metal.o: ds4_metal.m ds4.h ds4_gpu.h ds4_gpu_tp.h ds4_deepseek41_gpu.h ds4_muse_gpu.h ds4_image.h $(METAL_SRCS)
 	$(CC) $(OBJCFLAGS) -c -o $@ ds4_metal.m
 
 tests/test_glm53_kda.o: tests/test_glm53_kda.c ds4_gpu.h
@@ -1419,3 +1419,28 @@ gguf-tools/quality-testing/score_official_verify.o: gguf-tools/quality-testing/s
 
 gguf-tools/quality-testing/score_official_verify: gguf-tools/quality-testing/score_official_verify.o ds4_verify_test_hooks.o $(filter-out ds4.o,$(CORE_OBJS)) rax.o ds4_gpu_args.o
 	$(if $(filter Darwin,$(UNAME_S)),$(CC) $(CFLAGS),$(DS4_LINK)) -o $@ $^ $(if $(filter Darwin,$(UNAME_S)),$(METAL_LDLIBS),$(DS4_LINK_LIBS))
+
+# Muse primitives run on bounded synthetic tensors, without a checkpoint.
+tests/test_muse_metal: tests/test_muse_metal.c ds4_muse_gpu.h $(CORE_OBJS)
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $< $(CORE_OBJS) $(METAL_LDLIBS)
+
+.PHONY: test-muse-metal
+test-muse-metal: tests/test_muse_metal
+	./tests/test_muse_metal
+
+tests/test_muse_gguf.o: tests/test_muse_gguf.c ds4.c ds4.h
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
+
+tests/test_muse_gguf: tests/test_muse_gguf.o ds4_engram.c $(filter-out ds4_cpu.o,$(CPU_CORE_OBJS))
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $^ $(LDLIBS)
+
+.PHONY: test-muse-gguf
+test-muse-gguf: tests/test_muse_gguf
+	python3 tests/muse_gguf_fixture.py ./tests/test_muse_gguf
+
+tests/test_muse_attention: tests/test_muse_attention.c ds4_muse_gpu.h $(CORE_OBJS)
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $< $(CORE_OBJS) $(METAL_LDLIBS)
+
+.PHONY: test-muse-attention
+test-muse-attention: tests/test_muse_attention
+	./tests/test_muse_attention

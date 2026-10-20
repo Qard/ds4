@@ -25,6 +25,7 @@
 #include "ds4.h"
 #include "ds4_gpu.h"
 #include "ds4_image.h"
+#include "ds4_muse_gpu.h"
 
 /*
  * Objective-C Metal glue for the C engine.
@@ -4784,8 +4785,10 @@ static NSString *ds4_gpu_full_source(void) {
         @[@"DS4_METAL_NORM_SOURCE",       @"metal/norm.metal"],
         @[@"DS4_METAL_BIN_SOURCE",        @"metal/bin.metal"],
         @[@"DS4_METAL_SET_ROWS_SOURCE",   @"metal/set_rows.metal"],
+        @[@"DS4_METAL_QUANT_ROW_DOT_SOURCE", @"metal/quant_row_dot.metal"],
         @[@"DS4_METAL_QWEN4_SOURCE",      @"metal/qwen4.metal"],
         @[@"DS4_METAL_QWEN4_VISION_SOURCE", @"metal/qwen4_vision.metal"],
+        @[@"DS4_METAL_MUSE_SOURCE",       @"metal/muse_spark.metal"],
     ];
 
     NSMutableString *source = [NSMutableString stringWithString:base];
@@ -50534,4 +50537,168 @@ int ds4_gpu_qwen4_hc_mix_rows_tensor(ds4_gpu_tensor *mixed, const ds4_gpu_tensor
     }
     return qwen4_dispatch(QWEN4_K_HC_MIX_ROWS, &args, sizeof(args), b, 3,
                           MTLSizeMake((n_embd + 255) / 256, n_tokens, 1), MTLSizeMake(256, 1, 1), 0);
+}
+
+/* Muse wrappers use the same model views, command batching, and pipeline cache
+ * as the existing native graphs. No model weights cross into a Python runtime. */
+typedef struct { id<MTLBuffer> buf; NSUInteger off; } muse_bind;
+
+static bool muse_tensor(muse_bind *b, const ds4_gpu_tensor *t, uint64_t bytes) {
+    if (!t || !ds4_gpu_tensor_buffer(t) || ds4_gpu_tensor_bytes(t) < bytes) return false;
+    b->buf = ds4_gpu_tensor_buffer(t);
+    b->off = ds4_gpu_tensor_offset(t);
+    return true;
+}
+
+static bool muse_weight_bind(muse_bind *b, const void *map, uint64_t size, uint64_t offset, uint64_t bytes) {
+    if (!map || !bytes || offset > size || bytes > size - offset) return false;
+    uint64_t inner = 0;
+    b->buf = ds4_gpu_wrap_model_range(map, size, offset, bytes, &inner);
+    b->off = inner;
+    return b->buf != nil;
+}
+
+static int muse_dispatch(const char *name, const void *args, size_t length,
+                         const muse_bind *binds, unsigned count, MTLSize grid) {
+    if (!g_initialized && !ds4_gpu_init()) return 0;
+    @autoreleasepool {
+        id<MTLComputePipelineState> pipeline = ds4_gpu_get_pipeline(name);
+        if (!pipeline) return 0;
+        int owned = 0;
+        id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+        if (!cb) return 0;
+        id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        [enc setComputePipelineState:pipeline];
+        [enc setBytes:args length:length atIndex:0];
+        for (unsigned i = 0; i < count; i++)
+            [enc setBuffer:binds[i].buf offset:binds[i].off atIndex:i + 1];
+        [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        ds4_gpu_end_compute_encoder(cb, enc);
+        return ds4_gpu_finish_command_buffer(cb, owned, name);
+    }
+}
+
+int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t size,
+    uint64_t offset, uint32_t type, uint32_t in_dim, uint32_t out_dim,
+    const ds4_gpu_tensor *x, uint32_t tokens) {
+    if (!in_dim || (in_dim % 4) || !out_dim || !tokens) return 0;
+    uint64_t row_bytes = type == 0 ? 4ull * in_dim :
+        (type == 1 || type == 30) ? 2ull * in_dim :
+        type == 14 ? (in_dim % 256 ? 0 : (in_dim / 256ull) * 210) : qwen4_expert_row_bytes(type, in_dim);
+    if (!row_bytes || row_bytes > UINT32_MAX || row_bytes > UINT64_MAX / out_dim) return 0;
+    struct { uint32_t in_dim, out_dim, rows, type, row_bytes; } a = {
+        in_dim, out_dim, tokens, type, (uint32_t)row_bytes };
+    muse_bind b[3];
+    if (!muse_weight_bind(&b[0], map, size, offset, row_bytes * out_dim) ||
+        !muse_tensor(&b[1], x, (uint64_t)tokens * in_dim * 4) ||
+        !muse_tensor(&b[2], out, (uint64_t)tokens * out_dim * 4)) return 0;
+    return muse_dispatch("kernel_muse_linear", &a, sizeof(a), b, 3, MTLSizeMake(out_dim, tokens, 1));
+}
+
+int ds4_gpu_muse_input_norm_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,
+    const void *map, uint64_t size, uint64_t weight_offset,
+    uint32_t rows, uint32_t width, float eps) {
+    if (!rows || !width || !isfinite(eps) || eps <= 0) return 0;
+    struct { uint32_t rows, width; float eps; } a = {
+        rows, width, eps };
+    muse_bind b[3];
+    if (!muse_tensor(&b[0], x, (uint64_t)rows * width * 4) ||
+        !muse_weight_bind(&b[1], map, size, weight_offset, (uint64_t)width * 4) ||
+        !muse_tensor(&b[2], out, (uint64_t)rows * width * 4)) return 0;
+    return muse_dispatch("kernel_muse_input_norm", &a, sizeof(a), b, 3, MTLSizeMake(rows, 1, 1));
+}
+
+typedef struct {
+    uint32_t tokens, heads, kv_heads, dim, pos0, cap, window, rope;
+    float rope_base;
+} muse_attention_args;
+
+static bool muse_attention_shape(uint32_t tokens, uint32_t heads, uint32_t kv_heads,
+        uint32_t dim, uint32_t pos0, uint32_t cap) {
+    return tokens && heads && heads <= 128 && kv_heads && kv_heads <= 16 &&
+        heads % kv_heads == 0 && dim == 64 && cap &&
+        (uint64_t)pos0 + tokens <= UINT32_MAX;
+}
+
+int ds4_gpu_muse_kv_store_tensor(ds4_gpu_tensor *q, ds4_gpu_tensor *kc, ds4_gpu_tensor *vc,
+    const ds4_gpu_tensor *k, const ds4_gpu_tensor *v, uint32_t tokens,
+    uint32_t heads, uint32_t kv_heads, uint32_t dim, uint32_t pos0,
+    uint32_t cap, float rope_base, bool rope) {
+    if (!muse_attention_shape(tokens, heads, kv_heads, dim, pos0, cap) ||
+        !isfinite(rope_base) || rope_base <= 0.f) return 0;
+    muse_bind b[5];
+    uint64_t projection = (uint64_t)tokens*kv_heads*dim*4;
+    uint64_t cache = (uint64_t)cap*kv_heads*dim*2;
+    if (!muse_tensor(&b[0], q, (uint64_t)tokens*heads*dim*4) ||
+        !muse_tensor(&b[1], kc, cache) || !muse_tensor(&b[2], vc, cache) ||
+        !muse_tensor(&b[3], k, projection) || !muse_tensor(&b[4], v, projection)) return 0;
+    muse_attention_args args = {tokens, heads, kv_heads, dim, pos0, cap, 0, rope, rope_base};
+    return muse_dispatch("kernel_muse_kv_store", &args, sizeof(args), b, 5,
+                         MTLSizeMake(heads, tokens, 1));
+}
+
+uint64_t ds4_gpu_muse_attention_scratch_bytes(uint32_t tokens, uint32_t heads, uint32_t dim) {
+    if (!tokens || !heads || heads > 128 || dim != 64) return 0;
+    return (uint64_t)tokens*heads*32*(dim+2)*4;
+}
+
+int ds4_gpu_muse_attention_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *q,
+    const ds4_gpu_tensor *kc, const ds4_gpu_tensor *vc, ds4_gpu_tensor *scratch,
+    uint32_t tokens, uint32_t heads, uint32_t kv_heads, uint32_t dim,
+    uint32_t pos0, uint32_t cap, uint32_t window) {
+    if (!muse_attention_shape(tokens, heads, kv_heads, dim, pos0, cap)) return 0;
+    uint64_t end = (uint64_t)pos0+tokens;
+    uint64_t needed = window ? MIN(end, (uint64_t)window+tokens-1) : end;
+    if (cap < needed) return 0;
+    muse_bind b[4], merge[2];
+    uint64_t projection = (uint64_t)tokens*heads*dim*4;
+    uint64_t cache = (uint64_t)cap*kv_heads*dim*2;
+    if (!muse_tensor(&b[0], q, projection) || !muse_tensor(&b[1], kc, cache) ||
+        !muse_tensor(&b[2], vc, cache) ||
+        !muse_tensor(&b[3], scratch, ds4_gpu_muse_attention_scratch_bytes(tokens, heads, dim)) ||
+        !muse_tensor(&merge[1], out, projection)) return 0;
+    merge[0] = b[3];
+    muse_attention_args args = {tokens, heads, kv_heads, dim, pos0, cap, window, 0, 0};
+    return muse_dispatch("kernel_muse_attention_split", &args, sizeof(args), b, 4,
+                         MTLSizeMake(heads, 32, tokens)) &&
+           muse_dispatch("kernel_muse_attention_merge", &args, sizeof(args), merge, 2,
+                         MTLSizeMake(heads, tokens, 1));
+}
+
+typedef struct { uint32_t rows, width; float scale, cap; } muse_pointwise_args;
+
+int ds4_gpu_muse_residual_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *stream,
+    const ds4_gpu_tensor *branch, const void *map, uint64_t size,
+    uint64_t alpha_offset, uint64_t beta_offset, uint32_t rows, uint32_t width) {
+    if (!rows || !width) return 0;
+    muse_bind b[5];
+    uint64_t bytes = (uint64_t)rows*width*4;
+    if (!muse_tensor(&b[0], stream, bytes) || !muse_tensor(&b[1], branch, bytes) ||
+        !muse_weight_bind(&b[2], map, size, alpha_offset, (uint64_t)width*4) ||
+        !muse_weight_bind(&b[3], map, size, beta_offset, (uint64_t)width*4) ||
+        !muse_tensor(&b[4], out, bytes)) return 0;
+    muse_pointwise_args a = {rows,width,0,0};
+    return muse_dispatch("kernel_muse_residual", &a, sizeof(a), b, 5,
+                         MTLSizeMake(((uint64_t)width+31)/32, rows, 1));
+}
+
+int ds4_gpu_muse_gate_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,
+    const ds4_gpu_tensor *gate, uint32_t n) {
+    if (!n) return 0;
+    muse_bind b[3];
+    uint64_t bytes = (uint64_t)n*4;
+    if (!muse_tensor(&b[0], x, bytes) || !muse_tensor(&b[1], gate, bytes) ||
+        !muse_tensor(&b[2], out, bytes)) return 0;
+    muse_pointwise_args a = {1,n,0,0};
+    return muse_dispatch("kernel_muse_gate", &a, sizeof(a), b, 3,
+                         MTLSizeMake(((uint64_t)n+31)/32, 1, 1));
+}
+
+int ds4_gpu_muse_logits_tensor(ds4_gpu_tensor *logits, uint32_t n, float scale, float cap) {
+    if (!n || !isfinite(scale) || !isfinite(cap) || scale <= 0 || cap <= 0) return 0;
+    muse_bind b;
+    if (!muse_tensor(&b, logits, (uint64_t)n*4)) return 0;
+    muse_pointwise_args a = {1,n,scale,cap};
+    return muse_dispatch("kernel_muse_logits", &a, sizeof(a), &b, 1,
+                         MTLSizeMake(((uint64_t)n+31)/32, 1, 1));
 }
