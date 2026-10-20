@@ -16,8 +16,9 @@ itself.
 
 This fork is adding [native Muse Spark Open support](docs/MUSE_SPARK.md)
 for 128 GB Apple Silicon Macs. The GGUF downloader, native Metal graph,
-sessions, CLI, server, and agent adapters are integrated. Full-checkpoint
-correctness and performance validation are still pending; see the linked status.
+sessions, CLI, server, and agent adapters are integrated. Real-checkpoint short
+generation, logits consistency and KV round trips pass. Long-context, live
+frontend and sustained performance validation are in progress; see the linked status.
 
 We test things in integration: model loading, prompt rendering,
 tool calls, KV state, the HTTP server, and the coding agent are built and tested together.

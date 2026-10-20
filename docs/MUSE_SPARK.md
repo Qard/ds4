@@ -8,8 +8,9 @@ loading, tokenizer, graph, sessions, KV persistence, CLI, server, evaluation, an
 adapters are implemented. Small independent fixtures exercise numerical
 correctness and the conversation protocol.
 
-**Full-checkpoint generation, numerical parity, sustained memory use, and
-throughput remain unvalidated. This branch is not yet production-ready.**
+**Real-checkpoint startup, short generation, full-vocabulary prefill consistency,
+and KV round trips pass. Long-context, live frontend, sustained memory and
+throughput validation are in progress. This branch is not yet production-ready.**
 Builds and bounded fixture tests run independently of the downloaded checkpoint.
 
 ## Download
@@ -172,3 +173,22 @@ sign/scale arithmetic; the separate packed-expert tests exercise arbitrary grid
 indices. Full-checkpoint checks still compare ds4 execution paths against each
 other; independently generated full-checkpoint golden logits are not included.
 No additional production runner is required by this test sequence.
+
+## Real-checkpoint validation evidence
+
+On the 128 GiB M5 Max, the pinned native checkpoint produced coherent raw text
+and answered the no-reasoning arithmetic prompt with `4`. The fixed-length
+numerical driver tested raw completion, chat without reasoning, and chat with
+reasoning at prefill chunks 1 and 32. All 202,048 logits matched exactly at the
+initial prefix and after each of eight teacher-forced continuation tokens.
+Snapshot logits, paired restored-session decoding, and prefix rewinds also
+matched exactly. The bounded 1024-expert test requested 12.38 GiB of expert cache
+and planned 31.31 GiB including fixed weights and two 4096-token sessions.
+
+These runs exposed a Q8 reduction mismatch between prefill and decode that the
+small fixture's numerical tolerance did not catch. Muse now uses the same FP32
+row kernel in both paths. The primitive test requires bit-identical results
+across batch sizes, and the complete packed graph again requires exact agreement
+between its all-row and last-row output heads. Independent NumPy checks still
+pass. These results establish short-prefix numerical consistency, rather than
+an independent full-checkpoint golden-logit comparison or end-to-end readiness.

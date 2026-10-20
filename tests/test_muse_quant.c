@@ -29,6 +29,15 @@ static void test_q8_linears(void) {
         assert(ds4_gpu_tensor_read(yb,0,actual,(TMAX*NMAX+2*PAD)*4));
         for(unsigned i=0;i<PAD;i++) assert(actual[i]==123456.f);
         for(unsigned i=PAD+t*n;i<TMAX*NMAX+2*PAD;i++) assert(actual[i]==123456.f);
+        for(unsigned row=0;row<t;row++) {
+            float single[NMAX];
+            ds4_gpu_tensor *rx=ds4_gpu_tensor_view(x,(uint64_t)row*k*4,(uint64_t)k*4);
+            ds4_gpu_tensor *ry=ds4_gpu_tensor_alloc(n*4);
+            assert(rx&&ry && ds4_gpu_muse_linear_tensor(ry,map,bytes,0,8,k,n,rx,1));
+            assert(ds4_gpu_tensor_read(ry,0,single,n*4));
+            assert(!memcmp(single,actual+PAD+row*n,n*4));
+            ds4_gpu_tensor_free(rx);ds4_gpu_tensor_free(ry);
+        }
         for(unsigned row=0;row<t;row++) for(unsigned out=0;out<n;out++) {
             double expected=0;
             for(unsigned col=0;col<k;col++) {

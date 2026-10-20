@@ -32,12 +32,8 @@ int main(int argc, char **argv) {
         if(!first) memcpy(first_logits,logits,sizeof(first_logits));
         float last[32];
         assert(muse_graph_forward(&last_graph,&m,&w,ids+first,n,last,false));
-        float output_error=0;
-        for(unsigned i=0;i<32;i++) output_error=MAX(output_error,fabsf(last[i]-logits[(n-1)*32+i]));
-        /* Q8 batched and single-row heads sum FP32 products in different
-         * orders. Both remain independently checked against NumPy below. */
-        if(packed) assert(output_error<1e-6f);
-        else assert(memcmp(last,logits+(n-1)*32,sizeof(last))==0);
+        /* Every Q8 row now uses the same FP32 reduction in both paths. */
+        assert(memcmp(last,logits+(n-1)*32,sizeof(last))==0);
         assert(fwrite(logits,32*4,n,out)==n);
         first+=n;
     }

@@ -50596,11 +50596,12 @@ static int muse_dispatch(const char *name, const void *args, size_t length,
     return muse_dispatch_resources(name,args,length,binds,count,grid,NULL,0);
 }
 
-static int muse_q8_f32_prefill(const muse_bind *b,uint32_t in_dim,uint32_t out_dim,
+static int muse_q8_f32_rows(const muse_bind *b,uint32_t in_dim,uint32_t out_dim,
                               uint32_t tokens,uint64_t row_bytes) {
-    /* Reuse the packed-weight FP32 multi-row kernel. The general prefill
-     * selector can round dequantized weights to half for matrix hardware;
-     * eight-row tiles retain FP32 arithmetic and bounded scratch instead. */
+    /* Use the same FP32 reduction for decode and prefill. Tiny differences
+     * from switching matvec kernels can cross F16 KV/routing boundaries over
+     * Muse's 62 layers and make prefix rewinds disagree with fresh prefill.
+     * Eight-row tiles reuse packed weights without expanding a weight bank. */
     const int16_t nsg=ds4_gpu_mv_ext_nsg(),nxpsg=8,r1ptg=4;
     id<MTLComputePipelineState> pipeline=ds4_gpu_get_mul_mv_ext_pipeline(
         ds4_gpu_mv_ext_name(1,r1ptg),nsg,nxpsg);
@@ -50622,7 +50623,7 @@ static int muse_q8_f32_prefill(const muse_bind *b,uint32_t in_dim,uint32_t out_d
              threadsPerThreadgroup:MTLSizeMake(32,nsg,1)];
     }
     ds4_gpu_end_compute_encoder(cb,enc);
-    return ds4_gpu_finish_command_buffer(cb,owned,"Muse Q8 FP32 prefill");
+    return ds4_gpu_finish_command_buffer(cb,owned,"Muse Q8 FP32 rows");
 }
 
 int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t size,
@@ -50640,8 +50641,7 @@ int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t si
         !muse_tensor(&b[1], x, (uint64_t)tokens * in_dim * 4) ||
         !muse_tensor(&b[2], out, (uint64_t)tokens * out_dim * 4)) return 0;
     if(type==8 && in_dim%128==0) {
-        if(tokens==1) return ds4_gpu_matmul_q8_0_decode_rows_exact_tensor(out,map,size,offset,in_dim,out_dim,x,1);
-        return muse_q8_f32_prefill(b,in_dim,out_dim,tokens,row_bytes);
+        return muse_q8_f32_rows(b,in_dim,out_dim,tokens,row_bytes);
     }
     return muse_dispatch("kernel_muse_linear", &a, sizeof(a), b, 3, MTLSizeMake(out_dim, tokens, 1));
 }

@@ -69,6 +69,15 @@ static int muse_native_check(ds4_engine *e, int ctx, const ds4_tokens *prompt,
     if (ds4_session_sync(a,prompt,err,errlen) ||
         ds4_session_copy_logits(a,current,vocab)!=vocab) goto done;
     if (muse_native_difference(initial,current,vocab,2e-3f,&result->rewind_max_error)) {
+        float replay_error=NAN,rewind_replay_error=NAN;
+        ds4_session_invalidate(b);
+        if(!ds4_session_sync(b,prompt,err,errlen) && ds4_session_copy_logits(b,restored,vocab)==vocab) {
+            replay_error=rewind_replay_error=0;
+            (void)muse_native_difference(initial,restored,vocab,0,&replay_error);
+            (void)muse_native_difference(current,restored,vocab,0,&rewind_replay_error);
+        }
+        fprintf(stderr,"Muse rewind diagnostic: initial/rewind %.9g initial/replay %.9g rewind/replay %.9g\n",
+                result->rewind_max_error,replay_error,rewind_replay_error);
         failure="rewound-prefix logits differ"; goto done;
     }
     if (vectors) ds4_gpu_print_memory_report("Muse paired sessions resident");
