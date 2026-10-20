@@ -50592,6 +50592,35 @@ static int muse_dispatch(const char *name, const void *args, size_t length,
     return muse_dispatch_resources(name,args,length,binds,count,grid,NULL,0);
 }
 
+static int muse_q8_f32_prefill(const muse_bind *b,uint32_t in_dim,uint32_t out_dim,
+                              uint32_t tokens,uint64_t row_bytes) {
+    /* Reuse the packed-weight FP32 multi-row kernel. The general prefill
+     * selector can round dequantized weights to half for matrix hardware;
+     * eight-row tiles retain FP32 arithmetic and bounded scratch instead. */
+    const int16_t nsg=ds4_gpu_mv_ext_nsg(),nxpsg=8,r1ptg=4;
+    id<MTLComputePipelineState> pipeline=ds4_gpu_get_mul_mv_ext_pipeline(
+        ds4_gpu_mv_ext_name(1,r1ptg),nsg,nxpsg);
+    if(!pipeline) return 0;
+    int owned=0;id<MTLCommandBuffer> cb=ds4_gpu_command_buffer(&owned);
+    if(!cb) return 0;
+    id<MTLComputeCommandEncoder> enc=ds4_gpu_compute_encoder(cb);
+    if(!enc) return 0;
+    [enc setComputePipelineState:pipeline];
+    [enc setBuffer:b[0].buf offset:b[0].off atIndex:1];
+    for(uint32_t first=0;first<tokens;first+=8) {
+        uint32_t rows=MIN(8u,tokens-first);
+        ds4_gpu_mul_mv_ext_args args=ds4_gpu_make_mv_ext_args(in_dim,out_dim,rows,34,row_bytes);
+        [enc setBytes:&args length:sizeof(args) atIndex:0];
+        [enc setBuffer:b[1].buf offset:b[1].off+(NSUInteger)first*in_dim*4 atIndex:2];
+        [enc setBuffer:b[2].buf offset:b[2].off+(NSUInteger)first*out_dim*4 atIndex:3];
+        uint32_t rows_per_group=(32u/nxpsg)*nsg;
+        [enc dispatchThreadgroups:MTLSizeMake((out_dim+rows_per_group-1)/rows_per_group,(rows+3)/4,1)
+             threadsPerThreadgroup:MTLSizeMake(32,nsg,1)];
+    }
+    ds4_gpu_end_compute_encoder(cb,enc);
+    return ds4_gpu_finish_command_buffer(cb,owned,"Muse Q8 FP32 prefill");
+}
+
 int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t size,
     uint64_t offset, uint32_t type, uint32_t in_dim, uint32_t out_dim,
     const ds4_gpu_tensor *x, uint32_t tokens) {
@@ -50606,6 +50635,10 @@ int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t si
     if (!muse_weight_bind(&b[0], map, size, offset, row_bytes * out_dim) ||
         !muse_tensor(&b[1], x, (uint64_t)tokens * in_dim * 4) ||
         !muse_tensor(&b[2], out, (uint64_t)tokens * out_dim * 4)) return 0;
+    if(type==8 && in_dim%128==0) {
+        if(tokens==1) return ds4_gpu_matmul_q8_0_decode_rows_exact_tensor(out,map,size,offset,in_dim,out_dim,x,1);
+        return muse_q8_f32_prefill(b,in_dim,out_dim,tokens,row_bytes);
+    }
     return muse_dispatch("kernel_muse_linear", &a, sizeof(a), b, 3, MTLSizeMake(out_dim, tokens, 1));
 }
 

@@ -3,6 +3,47 @@
 #include "../ds4.c"
 #include <assert.h>
 
+typedef struct {uint16_t d;int8_t qs[32];} muse_test_q8_0;
+
+static void test_q8_linears(void) {
+    enum {KMAX=8192,NMAX=64,TMAX=32,PAD=16};
+    size_t bytes=(size_t)NMAX*(KMAX/32)*34;
+    unsigned char *map=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    assert(map!=MAP_FAILED);uint32_t seed=817;
+    for(size_t i=0;i<bytes/34;i++) {
+        muse_test_q8_0 *b=(muse_test_q8_0 *)(map+i*34);b->d=(uint16_t)(0x2155+i%16);
+        for(unsigned j=0;j<32;j++) {seed=seed*1664525u+1013904223u;b->qs[j]=(int8_t)(seed>>24);}
+    }
+    float *input=xmalloc((size_t)TMAX*KMAX*4),*actual=xmalloc((TMAX*NMAX+2*PAD)*4);
+    for(unsigned i=0;i<TMAX*KMAX;i++) input[i]=sinf(i*.17f)*.135f+cosf(i*.07f)*.031f;
+    assert(ds4_gpu_init() && ds4_gpu_set_model_map(map,bytes));
+    ds4_gpu_tensor *xb=ds4_gpu_tensor_alloc((TMAX*KMAX+2*PAD)*4),*yb=ds4_gpu_tensor_alloc((TMAX*NMAX+2*PAD)*4);
+    ds4_gpu_tensor *x=ds4_gpu_tensor_view(xb,PAD*4,TMAX*KMAX*4),*y=ds4_gpu_tensor_view(yb,PAD*4,TMAX*NMAX*4);
+    assert(xb&&yb&&x&&y && ds4_gpu_tensor_write(x,0,input,TMAX*KMAX*4));
+    const unsigned rows[]={1,2,3,5,8,9,17,32};double worst=0;
+    for(unsigned shape=0;shape<2;shape++) for(unsigned ti=0;ti<sizeof(rows)/sizeof(*rows);ti++) {
+        unsigned k=shape?8192:128,n=shape?64:17,t=rows[ti],stride=k/32*34;
+        for(unsigned i=0;i<TMAX*NMAX+2*PAD;i++) actual[i]=123456.f;
+        assert(ds4_gpu_tensor_write(yb,0,actual,(TMAX*NMAX+2*PAD)*4));
+        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,8,k,n,x,t) && ds4_gpu_synchronize());
+        assert(ds4_gpu_tensor_read(yb,0,actual,(TMAX*NMAX+2*PAD)*4));
+        for(unsigned i=0;i<PAD;i++) assert(actual[i]==123456.f);
+        for(unsigned i=PAD+t*n;i<TMAX*NMAX+2*PAD;i++) assert(actual[i]==123456.f);
+        for(unsigned row=0;row<t;row++) for(unsigned out=0;out<n;out++) {
+            double expected=0;
+            for(unsigned col=0;col<k;col++) {
+                const muse_test_q8_0 *b=(muse_test_q8_0 *)(map+out*stride+(col/32)*34);
+                expected+=(double)f16_to_f32(b->d)*b->qs[col%32]*input[row*k+col];
+            }
+            double error=fabs(actual[PAD+row*n+out]-expected);worst=MAX(worst,error);
+            assert(error<6e-5+2e-6*fabs(expected));
+        }
+    }
+    printf("Muse Q8_0 FP32 linears, irregular rows and offset views: max error %.8g PASS\n",worst);
+    ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(y);ds4_gpu_tensor_free(xb);ds4_gpu_tensor_free(yb);
+    ds4_gpu_cleanup();munmap(map,bytes);free(input);free(actual);
+}
+
 int main(void) {
     enum {D=256,F=256,E=4,S=2,T=5,ROW=66,BANK=E*F*ROW,SIZE=3*BANK+D*4};
     FILE *file=tmpfile();assert(file && !ftruncate(fileno(file),SIZE));
@@ -55,5 +96,5 @@ int main(void) {
     }
     ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(selected);ds4_gpu_tensor_free(mid);
     ds4_gpu_tensor_free(part);ds4_gpu_tensor_free(weights);ds4_gpu_tensor_free(out);
-    ds4_gpu_cleanup();munmap(map,SIZE);fclose(file);return 0;
+    ds4_gpu_cleanup();munmap(map,SIZE);fclose(file);test_q8_linears();return 0;
 }
