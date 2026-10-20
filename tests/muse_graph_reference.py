@@ -17,26 +17,62 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'gguf-tools'))
 from qwen4_pack_to_qwen4exp import kv_bytes,w_str
 
 
-def checkpoint(path):
+def q8_payload(value):
+    blocks=value.reshape(-1,32)
+    scales=(np.max(np.abs(blocks),axis=1)/127).astype('<f2')
+    quant=np.clip(np.rint(blocks/scales[:,None]),-127,127).astype(np.int8)
+    payload=b''.join(s.tobytes()+q.tobytes() for s,q in zip(scales,quant))
+    return payload,(quant*scales.astype(np.float64)[:,None]).reshape(value.shape)
+
+
+def iq2_payload(shape,rng):
+    # Deliberately constructed IQ2_XXS blocks, not quantization or a call into
+    # ds4's decoder. These eight fixed codebook entries exercise 8/25/43 levels;
+    # sign parity and all sixteen local scales are generated independently.
+    grid=np.array([[8]*8,[43]+[8]*7,[25,25]+[8]*6,[8,43]+[8]*6,
+                   [43,43]+[8]*6,[25,8,25]+[8]*5,[8,25,25]+[8]*5,
+                   [8,8,43]+[8]*5],dtype=np.float64)
+    count=int(np.prod(shape))//256
+    base=rng.uniform(.0008,.0015,count).astype('<f2')
+    indices=rng.integers(0,8,(count,8,4),dtype=np.uint8)
+    signs=rng.integers(0,128,(count,8,4),dtype=np.uint32)
+    scales=rng.integers(0,16,(count,8),dtype=np.uint32)
+    bits=signs | ((np.bitwise_count(signs)&1)<<7)
+    polarity=1-2*((bits[...,None]>>np.arange(8,dtype=np.uint32))&1).astype(np.float64)
+    decoded=grid[indices]*polarity
+    decoded*=base.astype(np.float64)[:,None,None,None]*(scales[:,:,None,None]+.5)*.25
+    payload=bytearray()
+    words=scales<<28
+    for j in range(4): words |= signs[:,:,j]<<(7*j)
+    for row in range(count):
+        payload.extend(base[row].tobytes())
+        for group in range(8):
+            payload.extend(indices[row,group].tobytes())
+            payload.extend(struct.pack('<I',int(words[row,group])))
+    return bytes(payload),decoded.reshape(shape)
+
+
+def checkpoint(path,packed=False):
     rng=np.random.default_rng(817)
     weights={}
-    embedding=rng.integers(-32,33,(32,128),dtype=np.int8)
+    d=256 if packed else 128
+    embedding=rng.integers(-32,33,(32,d),dtype=np.int8)
     weights['token_embd.weight']=embedding.astype(np.float64)/32
-    weights['output_norm.weight']=rng.uniform(.8,1.2,128)
-    weights['output.weight']=rng.normal(0,.08,(32,128))
+    weights['output_norm.weight']=rng.uniform(.8,1.2,d)
+    weights['output.weight']=rng.normal(0,.08,(32,d))
     for i in range(2):
         pre=f'blk.{i}.'
-        for name,n in [('attn_norm',128),('attn_q_norm',64),('attn_k_norm',64),
-                       ('ffn_norm',128),('post_ffw_norm',128),
-                       ('ffn_pre_exp_norm',128),('ffn_post_exp_norm',128),
-                       ('attn_resid_alpha',128),('attn_resid_beta',128),
-                       ('ffn_resid_alpha',128),('ffn_resid_beta',128)]:
+        for name,n in [('attn_norm',d),('attn_q_norm',64),('attn_k_norm',64),
+                       ('ffn_norm',d),('post_ffw_norm',d),
+                       ('ffn_pre_exp_norm',d),('ffn_post_exp_norm',d),
+                       ('attn_resid_alpha',d),('attn_resid_beta',d),
+                       ('ffn_resid_alpha',d),('ffn_resid_beta',d)]:
             weights[pre+name+'.weight']=rng.uniform(.6,1.4,n)
-        for name,shape in [('attn_q',(128,128)),('attn_k',(64,128)),('attn_v',(64,128)),
-                           ('attn_output',(128,128)),('attn_gate',(128,128)),
-                           ('ffn_latent_down',(128,128)),('ffn_latent_up',(128,128)),
-                           ('ffn_gate_inp',(4,128)),('ffn_gate_exps',(4,128,128)),
-                           ('ffn_up_exps',(4,128,128)),('ffn_down_exps',(4,128,128))]:
+        for name,shape in [('attn_q',(d,d)),('attn_k',(d//2,d)),('attn_v',(d//2,d)),
+                           ('attn_output',(d,d)),('attn_gate',(d,d)),
+                           ('ffn_latent_down',(d,d)),('ffn_latent_up',(d,d)),
+                           ('ffn_gate_inp',(4,d)),('ffn_gate_exps',(4,d,d)),
+                           ('ffn_up_exps',(4,d,d)),('ffn_down_exps',(4,d,d))]:
             weights[pre+name+'.weight']=rng.normal(0,.075,shape)
         weights[pre+'exp_probs_b.bias']=rng.normal(0,.01,4)
     # Round the reference weights to exactly the stored values.
@@ -44,7 +80,11 @@ def checkpoint(path):
     tensors=[]
     for name,value in weights.items():
         kind=8 if name=='token_embd.weight' else 0
-        if kind==8:
+        if packed and value.ndim==3:
+            kind=16;payload,value=iq2_payload(value.shape,rng);weights[name]=value
+        elif packed and value.ndim==2:
+            kind=8;payload,value=q8_payload(value);weights[name]=value
+        elif kind==8:
             payload=b''.join(struct.pack('<e',1/32)+row.tobytes() for row in embedding.reshape(-1,32))
         else: payload=value.astype('<f4').tobytes()
         tensors.append((name,kind,list(reversed(value.shape)),payload))
@@ -65,13 +105,14 @@ def norm(x,w=None,eps=1e-5,input_scale=False):
 
 def reference(w):
     ids=np.arange(1,11)
+    d=w['token_embd.weight'].shape[1];heads=d//64;kv_heads=heads//2
     x=norm(w['token_embd.weight'][ids])
     for layer in range(2):
         def weight(name): return w[f'blk.{layer}.{name}.weight']
         h=norm(x,weight('attn_norm'))
-        q=(h@weight('attn_q').T).reshape(10,2,64)
-        k=(h@weight('attn_k').T).reshape(10,1,64)
-        v=(h@weight('attn_v').T).reshape(10,1,64).astype(np.float16).astype(np.float64)
+        q=(h@weight('attn_q').T).reshape(10,heads,64)
+        k=(h@weight('attn_k').T).reshape(10,kv_heads,64)
+        v=(h@weight('attn_v').T).reshape(10,kv_heads,64).astype(np.float16).astype(np.float64)
         q=norm(q,weight('attn_q_norm')); k=norm(k,weight('attn_k_norm'))
         if layer==0:
             angles=np.arange(10)[:,None,None]*500000.**(-np.arange(0,64,2)/64)
@@ -89,7 +130,7 @@ def reference(w):
             score=np.einsum('hd,phd->hp',q[t],np.repeat(k[lo:t+1],2,axis=1))/8
             p=np.exp(score-score.max(axis=-1,keepdims=True)); p/=p.sum(axis=-1,keepdims=True)
             attention[t]=np.einsum('hp,phd->hd',p,np.repeat(v[lo:t+1],2,axis=1))
-        attention=norm(attention).reshape(10,128)
+        attention=norm(attention).reshape(10,d)
         gate=1/(1+np.exp(-(h@weight('attn_gate').T)))
         branch=(attention*gate)@weight('attn_output').T
         x=x*weight('attn_resid_alpha')+norm(branch,eps=1e-8)*weight('attn_resid_beta')
@@ -115,12 +156,13 @@ def reference(w):
 if __name__=='__main__':
     with tempfile.TemporaryDirectory() as tmp:
         model=Path(tmp)/'tiny.gguf'; output=Path(tmp)/'logits.f32'
-        expected=reference(checkpoint(model))
-        for streamed in (0,1):
-            for chunk in (1,3,10):
-                subprocess.run([sys.argv[1],str(model),str(output),str(streamed),str(chunk)],check=True)
-                actual=np.fromfile(output,dtype='<f4').reshape(10,32)
-                error=np.max(np.abs(actual-expected))
-                assert error<5e-5,(streamed,chunk,error)
-                assert np.array_equal(actual.argmax(axis=-1),expected.argmax(axis=-1))
-                print(f'Muse complete graph streamed={streamed} chunk={chunk}: max error {error:.3g}',flush=True)
+        for packed in (False,True):
+            expected=reference(checkpoint(model,packed=packed))
+            for streamed in (0,1):
+                for chunk in (1,3,10):
+                    subprocess.run([sys.argv[1],str(model),str(output),str(streamed),str(chunk),str(int(packed))],check=True)
+                    actual=np.fromfile(output,dtype='<f4').reshape(10,32)
+                    error=np.max(np.abs(actual-expected))
+                    assert error<5e-5,(packed,streamed,chunk,error)
+                    assert np.array_equal(actual.argmax(axis=-1),expected.argmax(axis=-1))
+                    print(f'Muse complete graph packed={packed} streamed={streamed} chunk={chunk}: max error {error:.3g}',flush=True)

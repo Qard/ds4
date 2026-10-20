@@ -4,12 +4,13 @@
 #include <assert.h>
 
 int main(int argc, char **argv) {
-    assert(argc==5);
+    assert(argc==6);
+    bool packed=atoi(argv[5])!=0; unsigned d=packed?256:128;
     g_ds4_shape=DS4_SHAPE_MUSE_SPARK;
-    g_ds4_shape.n_layer=2; g_ds4_shape.n_embd=128; g_ds4_shape.n_vocab=32;
-    g_ds4_shape.n_head=2; g_ds4_shape.n_head_kv=1;
+    g_ds4_shape.n_layer=2; g_ds4_shape.n_embd=d; g_ds4_shape.n_vocab=32;
+    g_ds4_shape.n_head=d/64; g_ds4_shape.n_head_kv=d/128;
     g_ds4_shape.n_expert=4; g_ds4_shape.n_expert_used=2;
-    g_ds4_shape.n_ff_exp=128; g_ds4_shape.n_moe_latent=128; g_ds4_shape.n_swa=4;
+    g_ds4_shape.n_ff_exp=d; g_ds4_shape.n_moe_latent=d; g_ds4_shape.n_swa=4;
     g_muse_swa[0]=1; g_muse_swa[1]=0;
     ds4_model m; model_open(&m,argv[1],true,false);
     ds4_weights w; weights_bind(&w,&m,false,0,UINT32_MAX,true,false);
@@ -20,7 +21,7 @@ int main(int argc, char **argv) {
     assert(ds4_gpu_set_model_map(m.map,m.size) && ds4_gpu_set_model_fd(m.fd));
     unsigned chunk=atoi(argv[4]);
     ds4_muse_gpu_graph g,last_graph;
-    assert(muse_graph_bytes(32,3)-muse_graph_bytes(16,3)==16*64*4);
+    assert(muse_graph_bytes(32,3)-muse_graph_bytes(16,3)==16*(d/2)*4);
     assert(muse_graph_alloc(&g,16,chunk));
     assert(muse_graph_alloc(&last_graph,16,chunk));
     FILE *out=fopen(argv[2],"wb"); assert(out);
@@ -31,7 +32,12 @@ int main(int argc, char **argv) {
         if(!first) memcpy(first_logits,logits,sizeof(first_logits));
         float last[32];
         assert(muse_graph_forward(&last_graph,&m,&w,ids+first,n,last,false));
-        assert(memcmp(last,logits+(n-1)*32,sizeof(last))==0);
+        float output_error=0;
+        for(unsigned i=0;i<32;i++) output_error=MAX(output_error,fabsf(last[i]-logits[(n-1)*32+i]));
+        /* Q8 batched and single-row heads sum FP32 products in different
+         * orders. Both remain independently checked against NumPy below. */
+        if(packed) assert(output_error<1e-6f);
+        else assert(memcmp(last,logits+(n-1)*32,sizeof(last))==0);
         assert(fwrite(logits,32*4,n,out)==n);
         first+=n;
     }
