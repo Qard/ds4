@@ -17,6 +17,9 @@ class PreparationTests(unittest.TestCase):
             self.assertNotEqual(plan['server'][-1],plan['server_restart'][-1])
             self.assertEqual(plan['server'][:-1],plan['server_restart'][:-1])
             self.assertIn('--require-initial-cache',plan['api_restored'])
+            self.assertIn(str(repo.resolve()/'tests/muse_live_tools.py'),plan['api_multiple_tools'])
+            self.assertIn('--output',plan['api_multiple_tools'])
+            self.assertIn('muse_live_tools.py',(root/'RUNBOOK.md').read_text())
             reasoning=plan['agent_reasoning']
             self.assertEqual(reasoning[reasoning.index('--temperature')+1],'1')
             self.assertGreater(len((root/'benchmark.txt').read_text().split()),16384)
