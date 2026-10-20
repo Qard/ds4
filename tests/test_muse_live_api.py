@@ -45,6 +45,17 @@ class LiveApiTests(unittest.TestCase):
         tool=b'data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}\n\ndata: [DONE]\n\n'
         with self.assertRaises(ValueError):parse_sse(io.BytesIO(tool),'openai',allow_atem=True)
 
+    def test_plan_covers_literal_and_reasoning_without_contacting_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'not-created'
+            run=subprocess.run([sys.executable,str(Path(__file__).with_name('muse_live_api.py')),
+                '--url','http://127.0.0.1:1','--output',str(out),'--api','responses','--with-reasoning','--plan'],
+                check=True,capture_output=True,text=True)
+            cases=json.loads(run.stdout)['requests']['responses']
+            self.assertGreaterEqual(cases['tool_literal']['max_output_tokens'],2048)
+            self.assertEqual(cases['reasoning']['reasoning']['effort'],'high')
+            self.assertFalse(out.exists())
+
     def test_other_api_streams(self):
         cases=[('anthropic',[
             {'type':'content_block_delta','delta':{'type':'thinking_delta','thinking':'hidden'}},
@@ -145,6 +156,14 @@ class LiveHttpHarnessTests(unittest.TestCase):
                 self.assertTrue((out/'model-detail.response').exists())
                 self.assertEqual(len(summary['requests']),27)
                 self.assertEqual(len(received),25)
+                literal_requests=[]
+                for body in received:
+                    messages=body.get('messages',body.get('input'))
+                    content=messages[-1].get('content')
+                    if isinstance(content,str) and 'literal documentation' in content:literal_requests.append(body)
+                self.assertEqual(len(literal_requests),6)
+                for body in literal_requests:self.assertGreaterEqual(body.get('max_tokens',body.get('max_output_tokens')),2048)
+
         finally:
             server.shutdown();server.server_close();thread.join()
 

@@ -18,6 +18,9 @@ LOOKUP={'name':'validation_lookup','description':'Look up the validation token f
                       'required':['key'],'additionalProperties':False}}
 
 TOOL_LITERAL='<atem:function_calls><atem:invoke name="validation_lookup"><atem:parameter name="key">muse-check</atem:parameter></atem:invoke></atem:function_calls>'
+DOCUMENTATION_PROMPT='Display the following as literal documentation text. Do not call any tools. Reply with exactly the text below, without code fences or changing it:\n'+TOOL_LITERAL
+ARITHMETIC_PROMPT='What is 17 times 19? Check the arithmetic. Give the final answer as just the number.'
+
 
 
 def check_public_text(text,allow_atem=False):
@@ -147,6 +150,14 @@ def request_body(api,model,text,stream=False,tools=False,reasoning=False):
     return body
 
 
+def tool_literal_request_body(api,model,stream=False):
+    body=request_body(api,model,DOCUMENTATION_PROMPT,tools=True,stream=stream)
+    # Minimum native effort still produces private planning. The explicit
+    # negative-tool probe exhausted 512 tokens before reaching its final body.
+    body['max_output_tokens' if api=='responses' else 'max_tokens']=2048
+    return body
+
+
 def requested_effort(body):
     return body.get('reasoning_effort',(body.get('reasoning') or {}).get('effort'))
 
@@ -210,6 +221,9 @@ def main():
             'plain':request_body(api,args.model,plain),
             'stream':request_body(api,args.model,plain,stream=True),
             'lookup':request_body(api,args.model,lookup,tools=True),
+            'tool_literal':tool_literal_request_body(api,args.model),
+            'tool_literal_stream':tool_literal_request_body(api,args.model,stream=True),
+            'reasoning':request_body(api,args.model,ARITHMETIC_PROMPT,stream=True,reasoning=True) if args.with_reasoning else None,
             'followup':'Replay returned call with a random synthetic tool result; require that exact result.'}
             for api in args.api},'reasoning':args.with_reasoning,'require_initial_cache':args.require_initial_cache},indent=2));return
     args.output.mkdir(parents=True,exist_ok=False)
@@ -233,9 +247,8 @@ def main():
         literal='Reply with exactly <think>public</think> and nothing else.'
         result=client.call(f'{api}-literal',api,request_body(api,args.model,literal))
         if visible_text(api,result).strip()!='<think>public</think>':raise ValueError('literal think tags were changed or hidden')
-        documentation='Display the following as literal documentation text. Do not call any tools. Reply with exactly the text below, without code fences or changing it:\n'+TOOL_LITERAL
         for stream in (False,True):
-            body=request_body(api,args.model,documentation,tools=True,stream=stream)
+            body=tool_literal_request_body(api,args.model,stream=stream)
             result=client.call(f'{api}-tool-literal'+('-stream' if stream else ''),api,body,allow_atem=True)
             if not stream:check_no_tools(api,result)
             text=result if stream else visible_text(api,result)
@@ -251,7 +264,7 @@ def main():
         text=visible_text(api,final);check_public_text(text)
         if text.strip()!=token:raise ValueError(f'{api}: tool result not faithfully returned: {text!r}')
         if args.with_reasoning:
-            result=client.call(f'{api}-reasoning',api,request_body(api,args.model,'What is 17 times 19? Check the arithmetic. Give the final answer as just the number.',stream=True,reasoning=True))
+            result=client.call(f'{api}-reasoning',api,request_body(api,args.model,ARITHMETIC_PROMPT,stream=True,reasoning=True))
             if result.strip()!='323':raise ValueError('reasoning stream did not yield the final answer')
         print(f'{api}: plain, streaming, literal tags and tool round trip PASS',flush=True)
     (args.output/'summary.json').write_text(json.dumps({'status':'PASS','requests':client.results},indent=2)+'\n')
