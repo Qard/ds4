@@ -45119,6 +45119,7 @@ bool ds4_token_is_thinking_control(ds4_engine *e, int token) {
 void ds4_chat_decode_init(ds4_chat_decode_state *state, ds4_think_mode mode) {
     memset(state,0,sizeof(*state));
     state->body=!ds4_think_mode_enabled(mode);
+    state->final_answer=state->body;
 }
 
 char *ds4_chat_decode_token(ds4_engine *e,ds4_chat_decode_state *state,int token,size_t *len) {
@@ -45127,19 +45128,22 @@ char *ds4_chat_decode_token(ds4_engine *e,ds4_chat_decode_state *state,int token
     if(!state) return NULL;
     const ds4_vocab *v=&e->vocab;
     if(token==v->muse_start_id || token==v->muse_eom_id) {
-        state->body=state->reasoning=false;state->header_len=0;state->header[0]=0;
+        state->body=state->reasoning=state->final_answer=false;state->header_len=0;state->header[0]=0;
         return ds4_strdup("");
     }
     if(token==v->muse_message_id) {
-        state->body=true;state->reasoning=false;
+        bool addressed=false,reasoning=false,final_answer=true;
         const char *p=state->header;
         while((p=strstr(p,"to="))) {
-            if((p==state->header || isspace((unsigned char)p[-1])) &&
-                !strncmp(p+3,"self",4) && (!p[7] || isspace((unsigned char)p[7]))) {
-                state->reasoning=true;break;
+            if(p==state->header || isspace((unsigned char)p[-1])) {
+                if(addressed || !p[3] || isspace((unsigned char)p[3])) return NULL;
+                addressed=true;
+                reasoning=!strncmp(p+3,"self",4) && (!p[7] || isspace((unsigned char)p[7]));
+                final_answer=!strncmp(p+3,"user",4) && (!p[7] || isspace((unsigned char)p[7]));
             }
             p+=3;
         }
+        state->body=true;state->reasoning=reasoning;state->final_answer=final_answer;
         return ds4_strdup("");
     }
     if(token==v->bos_id || ds4_token_is_stop(e,token)) return ds4_strdup("");
@@ -74638,7 +74642,7 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
     if(ds4_session_is_muse(s)) {
         uint32_t cap=muse_session_prefill_cap(e,(uint32_t)ctx_size);
         uint64_t bytes=muse_session_memory_bytes(ctx_size,cap);
-        if(ctx_size>1048576 || !muse_memory_admit(e,ds4_add_sat_u64(e->muse_session_bytes,bytes),false) ||
+        if(ctx_size>1048576 || !muse_session_admit(e,bytes) ||
             !muse_graph_alloc(&s->muse_graph,ctx_size,cap)) {free(s);return 1;}
         s->muse_graph_ready=true;s->muse_allocation_bytes=bytes;
         e->muse_session_bytes+=bytes;s->prefill_cap=cap;

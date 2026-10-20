@@ -859,6 +859,19 @@ static int test_v41_thinking(const char *model) {
 }
 
 static void test_muse_tool_syntax(void) {
+    const char *invalid[] = {
+        "<atem:function_calls><atem:invoke rename=\"bash\"></atem:invoke></atem:function_calls>",
+        "<atem:function_calls><atem:invoke name=\"read\"><atem:parameter rename=\"path\">x</atem:parameter></atem:invoke></atem:function_calls>",
+        "<atem:function_calls><atem:invoke name=\"read\" name=\"bash\"></atem:invoke></atem:function_calls>",
+        "<atem:function_calls><atem:invoke note=\"name='bash'\"></atem:invoke></atem:function_calls>",
+        "<atem:function_calls><atem:invoke name=\"read\"><atem:parameter name=\"path\">a</atem:parameter><atem:parameter name=\"path\">b</atem:parameter></atem:invoke></atem:function_calls>",
+        "<atem:function_calls></atem:function_calls>",
+    };
+    for(unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);i++) {
+        agent_dsml_parser p={.syntax=AGENT_TOOL_SYNTAX_MUSE};
+        agent_dsml_feed(&p,invalid[i],strlen(invalid[i]));
+        AGENT_TEST_ASSERT(p.state==AGENT_DSML_ERROR);agent_dsml_parser_free(&p);
+    }
     {
         const char *chunks[] = {"<think>literal</think>\n<atem:function_calls>",
             "<atem:invoke name=\"list\"><atem:parameter name=\"path\">.</atem:parameter>",

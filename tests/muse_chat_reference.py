@@ -25,6 +25,11 @@ if len(sys.argv)==3:
     from muse_chat_fixture import checkpoint
     model,tokenizer=checkpoint(tmp.name)
     subprocess.run([sys.argv[2],str(model)],check=True)
+    for marker in ('<|begin_of_text|>','<|end_of_text|>','<|eom|>','<|eot|>','<|start|>','<|message|>'):
+        bad=Path(tmp.name)/'missing-protocol.gguf'
+        bad.write_bytes(model.read_bytes().replace(marker.encode(),b'<|'+b'X'*(len(marker)-4)+b'|>'))
+        p=subprocess.run([sys.argv[1],str(bad),'1','','Hello'],capture_output=True,text=True)
+        assert p.returncode!=0 and 'required tokenizer token is missing:' in p.stderr,(marker,p.returncode,p.stderr)
 else: model,tokenizer=Path(sys.argv[2]),Path(sys.argv[3])
 full=tokenizers.Tokenizer.from_file(str(tokenizer))
 for mode,effort in ((1,'high'),(2,'xhigh'),(3,'low'),(4,'medium'),(0,'low')):

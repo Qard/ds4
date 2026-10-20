@@ -2299,6 +2299,28 @@ static void stream_append_token_text(eval_ui *ui, const char *text, size_t len, 
     free(tmp);
 }
 
+static char *eval_decode_piece(ds4_engine *engine,ds4_chat_decode_state *state,
+                               int token,byte_buf *answer,size_t *len) {
+    char *text=ds4_chat_decode_token(engine,state,token,len);
+    if(text && (!ds4_engine_is_muse(engine) || state->final_answer))
+        buf_append(answer,text,*len);
+    return text;
+}
+
+static void eval_project_piece(eval_ui *ui,ds4_engine *engine,const ds4_chat_decode_state *state,
+                                const char *text,size_t len,bool finish) {
+    if(!ds4_engine_is_muse(engine)) {stream_append_token_text(ui,text,len,finish);return;}
+    if(ui->in_think && !state->reasoning) stream_append_visible(ui,"\n",1);
+    ui->in_think=state->reasoning;
+    if(len) stream_append_visible(ui,text,len);
+}
+
+static void eval_build_think_close(ds4_engine *engine,ds4_tokens *tokens) {
+    if(ds4_engine_is_muse(engine))
+        ds4_tokenize_rendered_chat(engine,"<|eom|><|start|>assistant to=user<|message|>",tokens);
+    else ds4_tokenize_text(engine,"</think>",tokens);
+}
+
 typedef struct {
     size_t start;
     size_t end;
@@ -2640,7 +2662,7 @@ static int eval_auto_context_size(ds4_engine *engine,
     int ctx = EVAL_MAX_CONTEXT;
     int max_prompt = 0;
     int max_case = -1;
-    const int min_ctx = cfg->think_mode == DS4_THINK_MAX ?
+    const int min_ctx = cfg->think_mode == DS4_THINK_MAX && !ds4_engine_is_muse(engine) ?
                         (int)ds4_think_max_min_context() : 1;
 
     /* Think Max downgrades to normal thinking under its minimum context.  Size
@@ -2736,6 +2758,28 @@ static int token_rank_in_top(ds4_session *session, int token, int max_rank) {
     }
     free(top);
     return rank;
+}
+
+static int eval_think_close_token(ds4_session *session,const eval_config *cfg,
+        const ds4_tokens *close,bool thinking,bool multipart_soft,int remaining,
+        int *position,int *rank,eval_think_close_kind *kind) {
+    *rank=0;*kind=EVAL_THINK_CLOSE_NONE;
+    if(!close->len || (!thinking && *position<0)) return -1;
+    /* Complete an already-started native transition even if its first control
+     * token changed the recipient state. Soft closure follows the model's own
+     * top-ranked close marker; hard closure reserves the final-answer budget. */
+    if(*position>=0) {
+        int token=close->v[(*position)++];
+        if(*position>=close->len) *position=-1;
+        return token;
+    }
+    if(remaining<=cfg->hard_limit_reply_budget) *kind=EVAL_THINK_CLOSE_HARD;
+    else if(remaining<=cfg->soft_limit_reply_budget && (close->len==1 || multipart_soft)) {
+        *rank=token_rank_in_top(session,close->v[0],cfg->soft_limit_think_close_rank);
+        if(*rank>0) *kind=EVAL_THINK_CLOSE_SOFT;
+    }
+    if(*kind==EVAL_THINK_CLOSE_NONE) return -1;
+    *position=close->len>1?1:-1;return close->v[0];
 }
 
 static void trace_write_header(FILE *trace, const eval_config *cfg,
@@ -4100,6 +4144,7 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
     const bool tty = ui->enabled;
     const bool use_plain_color = !tty && isatty(STDOUT_FILENO);
     const ds4_think_mode think_mode = ds4_think_mode_for_context(cfg->think_mode, cfg->ctx_size);
+    const bool muse = ds4_engine_is_muse(engine);
     const char *system = eval_system_prompt();
 
     char *question = build_question_prompt(tc);
@@ -4226,11 +4271,12 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
     ui->phase_start_sec = now_sec();
     ui->speed_tps = 0.0;
     byte_buf raw = {0};
+    ds4_chat_decode_state decode;ds4_chat_decode_init(&decode,think_mode);
     bool plain_in_think = ds4_think_mode_enabled(think_mode);
     bool generation_in_think = ds4_think_mode_enabled(think_mode);
     eval_think_close_info think_close = {0};
     ds4_tokens think_close_tokens = {0};
-    if (generation_in_think) ds4_tokenize_text(engine, "</think>", &think_close_tokens);
+    if (generation_in_think) eval_build_think_close(engine, &think_close_tokens);
     if (!tty && plain_in_think) plain_set_thinking_color(use_plain_color);
     tui_refresh(ui, "thinking");
 
@@ -4311,31 +4357,8 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
         int token = -1;
         eval_think_close_kind close_kind = EVAL_THINK_CLOSE_NONE;
 
-        /* Benchmarks usually cap generation length, but DeepSeek can spend the
-         * entire budget in <think>.  This controller only acts while the model is
-         * still in thinking mode.  The soft limit is conservative: it accepts the
-         * model's own desire to end thinking when </think> is already near the
-         * top of the distribution.  The hard limit is a uniform benchmark rule:
-         * leave a fixed answer reserve instead of failing a case because all
-         * tokens were spent before the visible answer could start. */
-        if (generation_in_think && think_close_tokens.len > 0) {
-            if (forced_close_pos >= 0) {
-                token = think_close_tokens.v[forced_close_pos++];
-                if (forced_close_pos >= think_close_tokens.len) forced_close_pos = -1;
-            } else if (remaining_budget <= cfg->hard_limit_reply_budget) {
-                close_kind = EVAL_THINK_CLOSE_HARD;
-                token = think_close_tokens.v[0];
-                forced_close_pos = think_close_tokens.len > 1 ? 1 : -1;
-            } else if (remaining_budget <= cfg->soft_limit_reply_budget &&
-                       think_close_tokens.len == 1) {
-                close_rank = token_rank_in_top(session, think_close_tokens.v[0],
-                                               cfg->soft_limit_think_close_rank);
-                if (close_rank > 0) {
-                    close_kind = EVAL_THINK_CLOSE_SOFT;
-                    token = think_close_tokens.v[0];
-                }
-            }
-        }
+        token=eval_think_close_token(session,cfg,&think_close_tokens,generation_in_think,muse,
+            remaining_budget,&forced_close_pos,&close_rank,&close_kind);
         if (token < 0)
             token = ds4_session_sample(session, cfg->temperature, 0,
                                        cfg->top_p, cfg->min_p, rng);
@@ -4364,13 +4387,23 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
         }
 
         size_t len = 0;
-        char *text = ds4_token_text(engine, token, &len);
-        buf_append(&raw, text, len);
+        char *text = eval_decode_piece(engine, &decode, token, &raw, &len);
+        if(!text) {
+            const char *detail="malformed Muse recipient header";
+            plain_reset_color(use_plain_color);tui_run_clock_stop(ui);
+            ui->status[idx]=EVAL_FAILED;ui->generated_tokens[idx]=ui->generated;
+            trace_write_case(trace,cfg,tc,idx,ui->ncases,"ERROR",detail,system,question,
+                raw.v?raw.v:"",think_mode,prompt_tokens,ui->generated,generation_limit,now_sec()-t0,"?",&think_close);
+            fprintf(stderr,"ds4-eval: %s for %s\n",detail,tc->id);
+            free(question);ds4_tokens_free(&think_close_tokens);buf_free(&raw);return EVAL_RUN_ERROR;
+        }
         ui->generated++;
         ui->generated_tokens[idx] = ui->generated;
         tui_run_clock_tick(ui);
-        if (generation_in_think && raw.v && strstr(raw.v, "</think>")) {
-            generation_in_think = false;
+        bool was_thinking=generation_in_think;
+        if(muse) generation_in_think=!(decode.body && decode.final_answer);
+        else if(generation_in_think && raw.v && strstr(raw.v,"</think>")) generation_in_think=false;
+        if (was_thinking && !generation_in_think) {
             if (think_close.kind == EVAL_THINK_CLOSE_NONE) {
                 think_close.kind = EVAL_THINK_CLOSE_NATURAL;
                 think_close.token_index = ui->generated;
@@ -4382,10 +4415,14 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
         ui->speed_tps = elapsed > 0.001 ? (double)ui->generated / elapsed : 0.0;
 
         if (tty) {
-            stream_append_token_text(ui, text, len, false);
+            eval_project_piece(ui, engine, &decode, text, len, false);
             tui_refresh(ui, ui->in_think ? "thinking" : "answer");
         } else {
-            if (plain_in_think && strstr(raw.v ? raw.v : "", "</think>")) {
+            if(muse && plain_in_think!=decode.reasoning) {
+                plain_in_think=decode.reasoning;
+                if(plain_in_think) plain_set_thinking_color(use_plain_color);
+                else plain_reset_color(use_plain_color);
+            } else if (!muse && plain_in_think && strstr(raw.v ? raw.v : "", "</think>")) {
                 plain_in_think = false;
                 plain_reset_color(use_plain_color);
             }
@@ -4395,15 +4432,15 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
         free(text);
     }
     if (tty) {
-        stream_append_token_text(ui, NULL, 0, true);
+        eval_project_piece(ui, engine, &decode, NULL, 0, true);
         tui_draw_stream(ui);
     } else {
         plain_reset_color(use_plain_color);
         if (!raw.v || raw.len == 0 || raw.v[raw.len - 1] != '\n') fputc('\n', stdout);
     }
 
-    char got[EVAL_ANSWER_MAX];
-    bool complete = find_case_answer_strict(tc, raw.v ? raw.v : "",
+    char got[EVAL_ANSWER_MAX]="?";
+    bool complete = (!muse || (decode.body && decode.final_answer)) && find_case_answer_strict(tc, raw.v ? raw.v : "",
                                             got, sizeof(got));
     snprintf(ui->guess[idx], EVAL_ANSWER_MAX, "%s", got);
     bool pass = complete && answer_matches(tc, got);

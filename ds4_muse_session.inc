@@ -68,6 +68,27 @@ static bool muse_memory_admit(ds4_engine *e,uint64_t bytes,bool fit_cache) {
                                       ds4_gpu_recommended_working_set_size());
 }
 
+static bool muse_session_admit(ds4_engine *e,uint64_t bytes) {
+    /* Some frontends choose context after tokenizing their inputs. Refit the
+     * cache before the first graph exists; live sessions keep their admitted
+     * cache and must never trigger a resize underneath an in-flight forward. */
+    bool first=e->muse_session_bytes==0;
+    uint64_t count=e->placement_session_count_hint>0?e->placement_session_count_hint:1;
+    uint64_t reserve=MAX(e->muse_reserved_graph_bytes,ds4_mul_sat_u64(bytes,count));
+    uint32_t old_cache=e->ssd_streaming_cache_experts;
+    if(!muse_memory_admit(e,MAX(reserve,ds4_add_sat_u64(e->muse_session_bytes,bytes)),first)) return false;
+    e->muse_reserved_graph_bytes=reserve;
+    if(e->ssd_streaming && e->ssd_streaming_cache_experts!=old_cache) {
+        uint64_t expert=0;
+        if(!ds4_streaming_routed_expert_bytes(&e->weights,&expert)) return false;
+        ds4_gpu_set_streaming_expert_cache_budget(e->ssd_streaming_cache_experts);
+        ds4_gpu_set_streaming_expert_cache_expert_bytes(expert);
+        fprintf(stderr,"ds4: Muse first-session expert cache resized from %u to %u experts\n",
+            old_cache,e->ssd_streaming_cache_experts);
+    }
+    return true;
+}
+
 static void muse_session_reset_graph(ds4_session *s) {
     s->muse_graph.pos=s->muse_graph.kv_highwater=s->muse_graph.swa_history_start=0;
     s->muse_graph.valid=true;s->muse_graph.cancelled=false;

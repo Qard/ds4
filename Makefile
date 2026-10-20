@@ -1347,6 +1347,7 @@ ds4_cpu_test_hooks.o ds4_cuda_test_hooks.o tests/test_session_state.o \
 tests/test_session_state_gpu.o: ds4_tool_text.h
 
 clean:
+	rm -f tests/test_muse_metal tests/test_muse_gguf tests/test_muse_attention tests/test_muse_experts tests/test_muse_graph tests/test_muse_tokenizer tests/test_muse_session tests/test_muse_memory tests/test_muse_chat tests/test_muse_decode tests/test_muse_server tests/test_muse_agent tests/test_muse_eval tests/test_muse_quant
 	rm -f tests/test_mmvq_cuda tests/test_mmvq_rocm
 	rm -f tests/test_qwen4_ngrams
 	rm -f tests/test_qwen4_ngram_state
@@ -1532,13 +1533,28 @@ tests/test_muse_agent: tests/test_muse_agent.o tests/muse_tokenizer_engine.o ds4
 
 .PHONY: test-muse-agent
 test-muse-agent: tests/test_muse_agent
-	uv run --script tests/muse_agent_reference.py ./tests/test_muse_agent
+	uv run --script tests/muse_frontend_reference.py ./tests/test_muse_agent
+
+tests/test_muse_eval.o: tests/test_muse_eval.c ds4_eval.c ds4.h
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
+
+tests/test_muse_eval: tests/test_muse_eval.o tests/muse_tokenizer_engine.o ds4_eval_cases.o ds4_help.o ds4_engram.o $(filter-out ds4_cpu.o,$(CPU_CORE_OBJS))
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+.PHONY: test-muse-eval
+test-muse-eval: tests/test_muse_eval
+	uv run --script tests/muse_frontend_reference.py ./tests/test_muse_eval
 
 # Included adapters must invalidate server builds and the server unit suite.
 ds4_server.o ds4_server_cpu.o ds4_test.o: ds4_muse_server_render.inc ds4_muse_server_parse.inc ds4_muse_server_stream.inc
 
 tests/test_muse_gguf.o tests/test_muse_graph.o tests/test_muse_tokenizer.o \
 tests/test_muse_session.o tests/test_muse_memory.o: ds4_muse_chat.inc
+
+tests/muse_tokenizer_engine.o tests/test_muse_chat.o tests/test_muse_decode.o \
+tests/test_muse_server.o tests/test_muse_agent.o tests/test_muse_eval.o \
+tests/test_muse_gguf.o tests/test_muse_graph.o tests/test_muse_tokenizer.o \
+tests/test_muse_session.o tests/test_muse_memory.o tests/test_muse_quant.o: ds4_tool_text.h
 
 tests/test_muse_quant.o: tests/test_muse_quant.c ds4.c ds4.h $(wildcard ds4_muse_*.inc)
 	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -I. -c -o $@ $<

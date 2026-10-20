@@ -4,14 +4,13 @@
 
 Muse runs through the native `ds4` C/Metal engine and its bounded SSD expert
 cache. There is no separate Muse runner or MLX inference dependency. Native
-loading, tokenizer, graph, sessions, KV persistence, CLI, server, and agent
+loading, tokenizer, graph, sessions, KV persistence, CLI, server, evaluation, and agent
 adapters are implemented. Small independent fixtures exercise numerical
 correctness and the conversation protocol.
 
 **Full-checkpoint generation, numerical parity, sustained memory use, and
 throughput remain unvalidated. This branch is not yet production-ready.**
-Full-checkpoint inference is currently held while LM Studio occupies the Mac;
-builds and bounded fixture tests can run independently.
+Builds and bounded fixture tests run independently of the downloaded checkpoint.
 
 ## Download
 
@@ -71,7 +70,10 @@ Admission reserves fixed weights, per-session KV and scratch, a safety margin,
 and the expert cache. It also measures currently available host memory before
 pinning weights. Another application's GPU allocations therefore reduce the
 allowed budget. Multiple sessions reserve independent KV state. Explicit cache
-requests are capped to the safe budget and must fit at least eight experts.
+requests are capped to the safe budget and must fit at least eight experts. If a
+frontend chooses a larger context after tokenization, the first session can
+refit the cache before allocating its graph. Live sessions never resize that
+cache underneath another session.
 
 The current kernels and expert scheduling still need full-model performance
 validation. Passing fixture tests does not establish useful token throughput.
@@ -80,7 +82,7 @@ validation. Passing fixture tests does not establish useful token throughput.
 
 ```sh
 make test-muse-gguf test-muse-tokenizer
-make test-muse-chat test-muse-server test-muse-agent test-muse-engine
+make test-muse-chat test-muse-server test-muse-agent test-muse-eval test-muse-engine
 make test-muse-metal test-muse-attention test-muse-experts test-muse-quant
 make test-muse-graph test-muse-session test-muse-memory
 uv run --with huggingface-hub==2.2.0 --with 'numpy>=2,<3' \

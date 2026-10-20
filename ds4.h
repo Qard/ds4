@@ -394,11 +394,12 @@ void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_thi
 
 char *ds4_token_text(ds4_engine *e, int token, size_t *len);
 /* Decode control tokens separately from body text. Literal text such as
- * "<think>" remains body data in recipient-based protocols. */
+ * "<think>" remains body data in recipient-based protocols. final_answer
+ * distinguishes user-directed bodies from private, commentary, and tool text. */
 typedef struct {
     char header[512];
     uint32_t header_len;
-    bool body, reasoning;
+    bool body, reasoning, final_answer;
 } ds4_chat_decode_state;
 void ds4_chat_decode_init(ds4_chat_decode_state *state, ds4_think_mode mode);
 char *ds4_chat_decode_token(ds4_engine *e, ds4_chat_decode_state *state,

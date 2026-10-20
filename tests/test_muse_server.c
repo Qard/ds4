@@ -13,6 +13,16 @@ static void test_muse_render(void) {
     free(prompt);chat_msgs_free(&msgs);
 }
 static void test_muse_tool_roundtrip(void) {
+    const char *invalid[]={
+        "<atem:function_calls><atem:invoke rename=\"bash\"></atem:invoke></atem:function_calls>",
+        "<atem:function_calls><atem:invoke name=\"read\" name=\"bash\"></atem:invoke></atem:function_calls>",
+        "<atem:function_calls><atem:invoke name=\"read\"><atem:parameter rename=\"path\">x</atem:parameter></atem:invoke></atem:function_calls>",
+    };
+    for(unsigned i=0;i<sizeof(invalid)/sizeof(*invalid);i++) {
+        char *content=NULL,*reasoning=NULL;tool_calls calls={0};
+        assert(!parse_muse_generated_message(invalid[i],&content,&reasoning,&calls,NULL));
+        free(content);free(reasoning);tool_calls_free(&calls);
+    }
     const char *raw="<atem:function_calls>\n<atem:invoke name=\"bash\">\n<atem:parameter name=\"command\">123</atem:parameter>\n<atem:parameter name=\"count\">2</atem:parameter>\n</atem:invoke>\n</atem:function_calls>";
     char *content=NULL,*reasoning=NULL;tool_calls calls={0};tool_schema_orders orders={0};
     tool_schema_orders_add_json(&orders,"{\"name\":\"bash\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"},\"count\":{\"type\":\"integer\"}}}}");
@@ -23,6 +33,17 @@ static void test_muse_tool_roundtrip(void) {
     buf rendered={0};append_tool_calls_text_for_syntax(&rendered,(server_model_syntax)4,&calls,&orders);
     assert(!strcmp(rendered.ptr,raw));buf_free(&rendered);
     free(content);free(reasoning);tool_calls_free(&calls);tool_schema_orders_free(&orders);
+    const char *escaped="<atem:function_calls>\n<atem:invoke name=\"tool&#39;name\">\n"
+        "<atem:parameter name=\"key&#39;name\">literal &amp;</atem:parameter>\n</atem:invoke>\n</atem:function_calls>";
+    content=reasoning=NULL;calls=(tool_calls){0};
+    assert(parse_muse_generated_message(escaped,&content,&reasoning,&calls,NULL));
+    assert(calls.len==1 && !strcmp(calls.v[0].name,"tool'name"));
+    assert(strstr(calls.v[0].arguments,"\"key'name\": \"literal &amp;\""));
+    free(calls.raw_tool_text);calls.raw_tool_text=NULL;rendered=(buf){0};
+    append_muse_tool_call(&rendered,&calls.v[0]);assert(!strcmp(rendered.ptr,escaped));
+    buf_free(&rendered);free(content);free(reasoning);tool_calls_free(&calls);
+    char *literal=muse_tool_attr("<atem:invoke name=\"literal&amp;#39;\">","name");
+    assert(literal && !strcmp(literal,"literal&#39;"));free(literal);
 }
 static void test_muse_suffixes(void) {
     request r;request_init(&r,REQ_CHAT,128);r.model_syntax=(server_model_syntax)4;r.think_mode=DS4_THINK_HIGH;

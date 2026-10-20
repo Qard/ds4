@@ -9,4 +9,4 @@ from muse_chat_fixture import checkpoint
 with tempfile.TemporaryDirectory() as tmp:
     model, _ = checkpoint(tmp)
     subprocess.run([sys.argv[1], str(model)], check=True)
-print('Muse agent protocol: PASS')
+print('Native Muse frontend protocol: PASS')

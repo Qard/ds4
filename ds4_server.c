@@ -5957,6 +5957,9 @@ static char *dsml_unescape_text(const char *s) {
         } else if (!strncmp(s, "&apos;", 6)) {
             buf_putc(&b, '\'');
             s += 5;
+        } else if (!strncmp(s, "&#39;", 5)) {
+            buf_putc(&b, '\'');
+            s += 4;
         } else {
             buf_putc(&b, '&');
         }

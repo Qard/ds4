@@ -132,3 +132,4 @@ __pycache__/
 /tests/test_muse_server
 /tests/test_muse_agent
 /tests/test_muse_quant
+/tests/test_muse_eval

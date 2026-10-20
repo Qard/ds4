@@ -57,6 +57,25 @@ static void payload_roundtrips(ds4_engine *e,ds4_session *a,ds4_session *b,int *
     ds4_session_snapshot_free(&snap);ds4_session_snapshot_free(&small);
 }
 static void collect(void *ud,int token) {token_vec_push(ud,token);}
+static void first_session_resize(ds4_engine *e) {
+    uint64_t resident=0,expert=0;
+    assert(weights_streaming_non_routed_bytes(&e->weights,&resident));
+    assert(ds4_streaming_routed_expert_bytes(&e->weights,&expert));
+    e->muse_reserved_graph_bytes=muse_session_memory_bytes(16,3);
+    e->muse_memory_budget=(2ull<<30)+resident+e->muse_reserved_graph_bytes+8*expert;
+    e->ssd_streaming_cache_experts=8;e->ssd_streaming_cache_bytes=8*expert;
+    ds4_gpu_set_streaming_expert_cache_budget(8);
+    ds4_session *larger=NULL;
+    assert(ds4_session_create(&larger,e,4096)==0);
+    assert(e->ssd_streaming_cache_experts>=2 && e->ssd_streaming_cache_experts<8);
+    uint32_t cache=e->ssd_streaming_cache_experts;ds4_session *other=NULL;
+    assert(ds4_session_create(&other,e,4096)!=0 && !other);
+    assert(e->ssd_streaming_cache_experts==cache);
+    ds4_session_free(larger);
+    e->muse_reserved_graph_bytes=e->muse_memory_budget=0;
+    e->ssd_streaming_cache_experts=2;e->ssd_streaming_cache_bytes=0;
+    ds4_gpu_set_streaming_expert_cache_budget(2);
+}
 static void generation_roundtrip(ds4_engine *e,ds4_session *s,int *ids) {
     char err[256]={0};ds4_tokens prompt={.v=ids,.len=6,.cap=8};
     rebuild(s,ids,6);int expected[3];
@@ -86,6 +105,7 @@ int main(int argc,char **argv) {
     assert(ds4_gpu_init()); ds4_gpu_set_ssd_streaming(streamed);
     ds4_gpu_set_streaming_expert_cache_budget(2);
     assert(ds4_gpu_set_model_map(e.model.map,e.model.size) && ds4_gpu_set_model_fd(e.model.fd));
+    if(streamed) first_session_resize(&e);
     ds4_session *a=NULL,*b=NULL;
     assert(ds4_session_create(&a,&e,16)==0 && ds4_session_create(&b,&e,16)==0);
     assert(ds4_session_set_power(a,50)!=0 && ds4_engine_set_power(&e,50)!=0);

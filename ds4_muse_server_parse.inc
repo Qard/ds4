@@ -1,6 +1,13 @@
 /* ATEM values are delimiter-bounded text, deliberately not XML. Preserve
  * string whitespace and let schemas distinguish a numeric-looking string from
  * a JSON scalar. Attribute entities apply only to names. */
+static char *muse_tool_attr(const char *tag,const char *name) {
+    const char *p=tag,*value=NULL;size_t len=0;
+    while(*p && !isspace((unsigned char)*p) && *p!='>') p++;
+    if(!ds4_tool_attr_span(p,name,&value,&len)) return NULL;
+    char *raw=xstrndup(value,len),*decoded=dsml_unescape_text(raw);free(raw);return decoded;
+}
+
 static bool parse_muse_generated_message(const char *text,char **content_out,
         char **reasoning_out,tool_calls *calls,const tool_schema_orders *orders) {
     const char *start=strstr(text,"<atem:function_calls>");
@@ -18,7 +25,7 @@ static bool parse_muse_generated_message(const char *text,char **content_out,
             }
             if(strncmp(p,"<atem:invoke ",strlen("<atem:invoke "))) return false;
             const char *tag_end=strchr(p,'>');if(!tag_end) return false;
-            char *tag=xstrndup(p,tag_end-p+1),*name=dsml_attr(tag,"name");free(tag);
+            char *tag=xstrndup(p,tag_end-p+1),*name=muse_tool_attr(tag,"name");free(tag);
             if(!name || !name[0]) {free(name);return false;}
             p=tag_end+1;buf args={0};json_args seen={0};bool ok=true;
             for(;;) {
@@ -26,7 +33,7 @@ static bool parse_muse_generated_message(const char *text,char **content_out,
                 if(!strncmp(q,"</atem:invoke>",strlen("</atem:invoke>"))) {p=q+strlen("</atem:invoke>");break;}
                 if(strncmp(q,"<atem:parameter ",strlen("<atem:parameter "))) {ok=false;break;}
                 tag_end=strchr(q,'>');if(!tag_end) {ok=false;break;}
-                tag=xstrndup(q,tag_end-q+1);char *key=dsml_attr(tag,"name");free(tag);
+                tag=xstrndup(q,tag_end-q+1);char *key=muse_tool_attr(tag,"name");free(tag);
                 if(!key || !key[0] || json_args_find_unused(&seen,key)>=0) {free(key);ok=false;break;}
                 json_args_push(&seen,(json_arg){.key=xstrdup(key),.value=NULL});
                 const char *end=strstr(tag_end+1,"</atem:parameter>");

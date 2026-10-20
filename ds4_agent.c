@@ -1917,15 +1917,12 @@ static void agent_dsml_raw_append(agent_dsml_parser *p, const char *s, size_t n)
     p->raw[p->raw_len] = '\0';
 }
 
-static char *agent_parse_attr(const char *tag, const char *name) {
-    char pat[64];
-    snprintf(pat, sizeof(pat), "%s=\"", name);
-    const char *p = strstr(tag, pat);
-    if (!p) return NULL;
-    p += strlen(pat);
-    const char *end = strchr(p, '"');
-    if (!end) return NULL;
-    return xstrndup(p, (size_t)(end - p));
+static char *agent_parse_attr(agent_tool_syntax syntax,const char *tag,const char *name) {
+    const char *p=tag+1,*value=NULL;size_t value_len=0;
+    /* V4.1 separates the namespace marker from the tag name with a space. */
+    if(syntax==AGENT_TOOL_SYNTAX_DSML41) p+=strlen("｜DSML｜ ");
+    while(*p && !isspace((unsigned char)*p) && *p!='>') p++;
+    return ds4_tool_attr_span(p,name,&value,&value_len)?xstrndup(value,value_len):NULL;
 }
 
 static void agent_dsml_set_error(agent_dsml_parser *p, const char *msg) {
@@ -2443,7 +2440,7 @@ static void agent_dsml_parse(agent_dsml_parser *p) {
                 return;
             }
             agent_tool_call_free(&p->current);
-            p->current.name = agent_parse_attr(tag, "name");
+            p->current.name = agent_parse_attr(p->syntax, tag, "name");
             if (!p->current.name || !p->current.name[0]) {
                 free(tag);
                 agent_dsml_set_error(p, "tool invoke without name");
@@ -2452,8 +2449,8 @@ static void agent_dsml_parse(agent_dsml_parser *p) {
             p->parse_pos += tag_len;
         } else if (agent_dsml_open_tag_is(p->syntax, tag, parameter)) {
             free(p->param_name);
-            p->param_name = agent_parse_attr(tag, "name");
-            char *is_string = agent_parse_attr(tag, "string");
+            p->param_name = agent_parse_attr(p->syntax, tag, "name");
+            char *is_string = agent_parse_attr(p->syntax, tag, "string");
             p->param_is_string = p->syntax == AGENT_TOOL_SYNTAX_MUSE || (is_string && !strcmp(is_string, "true"));
             free(is_string);
             if (!p->param_name || !p->param_name[0]) {
