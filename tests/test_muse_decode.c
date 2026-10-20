@@ -11,11 +11,13 @@ int main(int argc,char **argv) {
     model_open(&e.model,argv[1],false,false);vocab_load(&e.vocab,&e.model);
     ds4_chat_decode_state s;ds4_chat_decode_init(&s);
     feed(&e,&s," to=self<|message|>private <think>literal</think>","private <think>literal</think>",true);
-    assert(!s.final_answer);
+    assert(!s.final_answer && !s.tool_call);
     feed(&e,&s,"<|eom|><|start|>assistant to=user<|message|>Answer <think>literal</think>","Answer <think>literal</think>",false);
-    assert(s.final_answer);
+    assert(s.final_answer && !s.tool_call);
     feed(&e,&s,"<|eom|><|start|>assistant to=bash<|message|><atem:function_calls>","<atem:function_calls>",false);
-    assert(!s.final_answer);
+    assert(!s.final_answer && s.tool_call);
+    feed(&e,&s,"<|eom|><|start|>assistant to=commentary<|message|>Example <atem:function_calls>","Example <atem:function_calls>",false);
+    assert(!s.final_answer && !s.tool_call);
     ds4_chat_decode_init(&s);
     assert(!s.final_answer && !s.body);
     feed(&e,&s," to=user<|message|>Just the answer","Just the answer",false);

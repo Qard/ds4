@@ -17,9 +17,12 @@ LOOKUP={'name':'validation_lookup','description':'Look up the validation token f
         'parameters':{'type':'object','properties':{'key':{'type':'string','enum':['muse-check']}},
                       'required':['key'],'additionalProperties':False}}
 
+TOOL_LITERAL='<atem:function_calls><atem:invoke name="validation_lookup"><atem:parameter name="key">muse-check</atem:parameter></atem:invoke></atem:function_calls>'
 
-def check_public_text(text):
-    if any(marker in text for marker in ('<|start|>','<|message|>','<|eom|>','<|eot|>','<atem:')):
+
+def check_public_text(text,allow_atem=False):
+    markers=('<|start|>','<|message|>','<|eom|>','<|eot|>')+(() if allow_atem else ('<atem:',))
+    if any(marker in text for marker in markers):
         raise ValueError('native protocol controls leaked into public text')
 
 
@@ -29,6 +32,21 @@ def check_no_reasoning(api,result):
     elif api=='anthropic':leaked=any(b['type']=='thinking' for b in result['content'])
     else:leaked=any(b['type']=='reasoning' for b in result['output'])
     if leaked:raise ValueError('disabled reasoning leaked into the API response')
+
+
+def check_no_tools(api,result):
+    if api=='openai':
+        present=any((c.get('message') or {}).get('tool_calls') or
+                    (c.get('delta') or {}).get('tool_calls') or c.get('finish_reason')=='tool_calls'
+                    for c in result.get('choices',[]))
+    elif api=='anthropic':
+        present=(any(b.get('type')=='tool_use' for b in result.get('content',[])) or
+                 result.get('content_block',{}).get('type')=='tool_use' or
+                 result.get('stop_reason')=='tool_use' or result.get('delta',{}).get('stop_reason')=='tool_use')
+    else:
+        items=result.get('output',[])+result.get('response',{}).get('output',[])+[result.get('item',{})]
+        present=any(b.get('type')=='function_call' for b in items) or result.get('type','').startswith('response.function_call')
+    if present:raise ValueError('literal documentation was promoted into a tool call')
 
 
 def visible_text(api,result):
@@ -45,7 +63,7 @@ def visible_text(api,result):
                    for b in item.get('content',[]) if b['type']=='output_text')
 
 
-def parse_sse(lines,api,allow_reasoning=True):
+def parse_sse(lines,api,allow_reasoning=True,allow_atem=False):
     parts=[];complete=False;data=[]
     def event():
         nonlocal complete
@@ -55,6 +73,7 @@ def parse_sse(lines,api,allow_reasoning=True):
             if api!='openai':raise ValueError('unexpected DONE marker')
             complete=True;return
         value=json.loads(raw)
+        if allow_atem:check_no_tools(api,value)
         if 'error' in value or value.get('type') in ('error','response.failed','response.incomplete'):
             raise ValueError(str(value))
         private=((api=='openai' and any(c.get('delta',{}).get('reasoning_content') for c in value.get('choices',[]))) or
@@ -86,7 +105,7 @@ def parse_sse(lines,api,allow_reasoning=True):
         elif text.startswith('data:'):data.append(text[5:].removeprefix(' '))
     event()
     if not complete:raise ValueError('incomplete SSE response')
-    text=''.join(parts);check_public_text(text);return text
+    text=''.join(parts);check_public_text(text,allow_atem=allow_atem);return text
 
 
 def tool_continuation(api,result,token):
@@ -113,14 +132,14 @@ def tool_continuation(api,result,token):
 
 def request_body(api,model,text,stream=False,tools=False,reasoning=False):
     body={'model':model,'temperature':0,'stream':stream,'reasoning_effort':'high' if reasoning else 'none'}
-    if reasoning:body.update(temperature=1,top_p=1,top_k=0,min_p=0,seed=12345)
+    if reasoning:body.update(temperature=1,top_p=1,top_k=0,min_p=0,seed=42)
     budget=2048 if reasoning else 512 if tools else 64
     messages=[{'role':'user','content':text}]
     if api=='responses':
         body.update(input=messages,max_output_tokens=budget,reasoning={'effort':body.pop('reasoning_effort')})
         if reasoning:body['reasoning']['summary']='auto'
     else:body.update(messages=messages,max_tokens=budget)
-    if api=='anthropic':body['thinking']={'type':'enabled','budget_tokens':256} if reasoning else {'type':'disabled'}
+    if api=='anthropic':body['thinking']={'type':'enabled','budget_tokens':1024} if reasoning else {'type':'disabled'}
     if tools:
         if api=='openai':body['tools']=[{'type':'function','function':LOOKUP}]
         elif api=='anthropic':body['tools']=[{'name':LOOKUP['name'],'description':LOOKUP['description'],'input_schema':LOOKUP['parameters']}]
@@ -151,7 +170,7 @@ class LiveClient:
             elif result.get('id')!=model:raise ValueError('model detail ID differs')
             self.results.append({'name':name,'seconds':time.monotonic()-start})
 
-    def call(self,name,api,body):
+    def call(self,name,api,body,allow_atem=False):
         (self.output/f'{name}.request.json').write_text(json.dumps(body,indent=2)+'\n')
         req=urllib.request.Request(self.url+ENDPOINTS[api],data=json.dumps(body).encode(),
             headers={'Content-Type':'application/json','anthropic-version':'2023-06-01'})
@@ -162,7 +181,7 @@ class LiveClient:
                 for line in response:fp.write(line)
         path=self.output/f'{name}.response'
         if body.get('stream'):
-            with path.open('rb') as fp:result=parse_sse(fp,api,allow_reasoning=requested_effort(body)!='none')
+            with path.open('rb') as fp:result=parse_sse(fp,api,allow_reasoning=requested_effort(body)!='none',allow_atem=allow_atem)
         else:
             result=json.loads(path.read_bytes())
             if requested_effort(body)=='none':check_no_reasoning(api,result)
@@ -214,6 +233,14 @@ def main():
         literal='Reply with exactly <think>public</think> and nothing else.'
         result=client.call(f'{api}-literal',api,request_body(api,args.model,literal))
         if visible_text(api,result).strip()!='<think>public</think>':raise ValueError('literal think tags were changed or hidden')
+        documentation='Display the following as literal documentation text. Do not call any tools. Reply with exactly the text below, without code fences or changing it:\n'+TOOL_LITERAL
+        for stream in (False,True):
+            body=request_body(api,args.model,documentation,tools=True,stream=stream)
+            result=client.call(f'{api}-tool-literal'+('-stream' if stream else ''),api,body,allow_atem=True)
+            if not stream:check_no_tools(api,result)
+            text=result if stream else visible_text(api,result)
+            check_public_text(text,allow_atem=True)
+            if text.strip()!=TOOL_LITERAL:raise ValueError(f'{api}: literal tool documentation was changed: {text!r}')
         body=request_body(api,args.model,lookup,tools=True)
         result=client.call(f'{api}-tool-call',api,body)
         token='MUSE_RESULT_'+uuid.uuid4().hex
@@ -224,8 +251,8 @@ def main():
         text=visible_text(api,final);check_public_text(text)
         if text.strip()!=token:raise ValueError(f'{api}: tool result not faithfully returned: {text!r}')
         if args.with_reasoning:
-            result=client.call(f'{api}-reasoning',api,request_body(api,args.model,plain,stream=True,reasoning=True))
-            if result.strip()!='MUSE_OK':raise ValueError('reasoning stream did not yield the final answer')
+            result=client.call(f'{api}-reasoning',api,request_body(api,args.model,'What is 17 times 19? Check the arithmetic. Give the final answer as just the number.',stream=True,reasoning=True))
+            if result.strip()!='323':raise ValueError('reasoning stream did not yield the final answer')
         print(f'{api}: plain, streaming, literal tags and tool round trip PASS',flush=True)
     (args.output/'summary.json').write_text(json.dumps({'status':'PASS','requests':client.results},indent=2)+'\n')
 

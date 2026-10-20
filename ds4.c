@@ -45128,11 +45128,11 @@ char *ds4_chat_decode_token(ds4_engine *e,ds4_chat_decode_state *state,int token
     if(!state) return NULL;
     const ds4_vocab *v=&e->vocab;
     if(token==v->muse_start_id || token==v->muse_eom_id) {
-        state->body=state->reasoning=state->final_answer=false;state->header_len=0;state->header[0]=0;
+        state->body=state->reasoning=state->final_answer=state->tool_call=false;state->header_len=0;state->header[0]=0;
         return ds4_strdup("");
     }
     if(token==v->muse_message_id) {
-        bool addressed=false,reasoning=false,final_answer=true;
+        bool addressed=false,reasoning=false,final_answer=true,commentary=false;
         const char *p=state->header;
         while((p=strstr(p,"to="))) {
             if(p==state->header || isspace((unsigned char)p[-1])) {
@@ -45140,10 +45140,12 @@ char *ds4_chat_decode_token(ds4_engine *e,ds4_chat_decode_state *state,int token
                 addressed=true;
                 reasoning=!strncmp(p+3,"self",4) && (!p[7] || isspace((unsigned char)p[7]));
                 final_answer=!strncmp(p+3,"user",4) && (!p[7] || isspace((unsigned char)p[7]));
+                commentary=!strncmp(p+3,"commentary",10) && (!p[13] || isspace((unsigned char)p[13]));
             }
             p+=3;
         }
         state->body=true;state->reasoning=reasoning;state->final_answer=final_answer;
+        state->tool_call=addressed && !reasoning && !final_answer && !commentary;
         return ds4_strdup("");
     }
     if(token==v->bos_id || ds4_token_is_stop(e,token)) return ds4_strdup("");

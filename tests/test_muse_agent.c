@@ -47,6 +47,23 @@ static void test_semantic_stream(agent_worker *w) {
     free(out);agent_dsml_parser_free(&parser);ds4_tokens_free(&w->transcript);
 }
 
+static void test_public_tool_literal(agent_worker *w) {
+    const char *literal="<atem:function_calls><atem:invoke name=\"bash\"><atem:parameter name=\"command\">example</atem:parameter></atem:invoke></atem:function_calls>";
+    const char *headers[]={" to=user<|message|>"," to=commentary<|message|>"};
+    for(unsigned h=0;h<2;h++) {
+    agent_tail_capture tail={.cap=16384};
+    agent_token_renderer renderer={.engine=w->engine,.worker=w,.capture=&tail,.last_output_newline=true};
+    agent_dsml_parser parser={.syntax=AGENT_TOOL_SYNTAX_MUSE};
+    agent_stream_renderer stream={.renderer=&renderer,.parser=&parser,.syntax=AGENT_TOOL_SYNTAX_MUSE};
+    feed(w,&stream,headers[h]);feed(w,&stream,literal);
+    agent_stream_text(&stream,"",0,true);renderer_finish(&renderer);
+    size_t n=0;char *out=agent_tail_capture_take(&tail,&n);
+    AGENT_TEST_ASSERT(parser.calls.len==0);
+    AGENT_TEST_ASSERT(strstr(out,literal)!=NULL);
+    free(out);agent_dsml_parser_free(&parser);ds4_tokens_free(&w->transcript);
+    }
+}
+
 static void test_tool_results(agent_worker *w) {
     agent_tool_call calls[] = {{.name = "missing_one"}, {.name = "missing_two"}};
     agent_tool_calls all = {.v = calls, .len = 2};
@@ -128,8 +145,8 @@ int main(int argc, char **argv) {
     const char *first = strstr(text, "<|start|>system");
     AGENT_TEST_ASSERT(first && !strstr(first + 1, "<|start|>system"));
     free(text);ds4_tokens_free(&tokens);
-    test_semantic_stream(&w);
-    cfg.gen.think_mode=DS4_THINK_NONE;test_semantic_stream(&w);
+    test_semantic_stream(&w);test_public_tool_literal(&w);
+    cfg.gen.think_mode=DS4_THINK_NONE;test_semantic_stream(&w);test_public_tool_literal(&w);
     test_tool_results(&w);
     test_history(&w);
     test_tail_boundary(&w);

@@ -79,15 +79,16 @@ static void test_muse_semantic_sse(void) {
         buf reasoning={0};size_t emitted=0;buf_puts(&reasoning,"private <think>literal</think>");
         assert(muse_sse_reasoning_update(sv[0],&r,"muse",&oa,&an,&re,&reasoning,&emitted,true));
         assert(muse_sse_reasoning_update(sv[0],&r,"muse",&oa,&an,&re,&reasoning,&emitted,false));
-        const char *body="visible <think>literal</think><atem:function_calls>\n<atem:invoke name=\"bash\">\n<atem:parameter name=\"command\">pwd</atem:parameter>\n</atem:invoke>\n</atem:function_calls>";
+        const char *body="visible <think>literal</think><atem:function_calls>\n<atem:invoke name=\"bash\">\n<atem:parameter name=\"command\">pwd</atem:parameter>\n</atem:invoke>\n</atem:function_calls><atem:function_calls><atem:invoke name=\"read\"><atem:parameter name=\"path\">README.md</atem:parameter></atem:invoke></atem:function_calls>";
         char *content=NULL,*hidden=NULL;tool_calls calls={0};assert(parse_muse_generated_message(body,&content,&hidden,&calls,NULL));
-        if(r.api==API_OPENAI) assert(openai_sse_finish_live(sv[0],NULL,&r,"muse",&oa,body,strlen(body),&calls,"tool_calls",1,8));
-        else if(r.api==API_ANTHROPIC) assert(anthropic_sse_finish_live(sv[0],NULL,&r,"muse",&an,body,strlen(body),&calls,"tool_calls",8));
-        else assert(responses_sse_finish_live(sv[0],&r,&re,body,strlen(body),NULL,&calls,"tool_calls",1,8,1));
+        assert(calls.len==2);request public=muse_public_stream_request(&r);
+        if(r.api==API_OPENAI) assert(openai_sse_finish_live(sv[0],NULL,&public,"muse",&oa,content,strlen(content),&calls,"tool_calls",1,8));
+        else if(r.api==API_ANTHROPIC) assert(anthropic_sse_finish_live(sv[0],NULL,&public,"muse",&an,content,strlen(content),&calls,"tool_calls",8));
+        else assert(responses_sse_finish_live(sv[0],&public,&re,content,strlen(content),NULL,&calls,"tool_calls",1,8,1));
         shutdown(sv[0],SHUT_WR);char *wire=read_socket_text(sv[1]);
         assert(strstr(wire,"private <think>literal</think>") && strstr(wire,"visible <think>literal</think>"));
         assert(!strstr(wire,"<atem:") && !strstr(wire,"\"content\":\"private") && !strstr(wire,"\"type\":\"output_text\",\"text\":\"private") && !strstr(wire,"\"type\":\"text_delta\",\"text\":\"private"));
-        assert(strstr(wire,"bash"));free(wire);close(sv[0]);close(sv[1]);
+        assert(strstr(wire,"bash") && strstr(wire,"read"));free(wire);close(sv[0]);close(sv[1]);
         free(content);free(hidden);tool_calls_free(&calls);buf_free(&reasoning);
         openai_stream_free(&oa);anthropic_stream_free(&an);responses_stream_free(&re);request_free(&r);
     }
@@ -131,4 +132,37 @@ static void test_muse_anthropic_schema(void) {
     assert(strstr(prompt,"\"key\":{\"type\":\"string\"}") && strstr(prompt,"\"required\":[\"key\"]"));
     free(prompt);buf_free(&recipients);
 }
-int main(int argc,char **argv) {assert(argc==2);ds4_engine *engine=ds4_test_muse_tokenizer_engine(argv[1]);test_muse_anthropic_schema();test_muse_sampling();test_muse_model_listing(engine);test_muse_hidden_reasoning_stream();test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();ds4_engine_close(engine);puts("Muse server prompt, model listing and ATEM roundtrip: PASS");}
+static void test_muse_literal_tool_channels(ds4_engine *engine) {
+    const char *literal="<atem:function_calls><atem:invoke name=\"bash\"></atem:invoke></atem:function_calls>";
+    ds4_tokens tokens={0};
+    ds4_tokenize_rendered_chat(engine," to=self<|message|>PRIVATE<|eom|><|start|>assistant to=commentary<|message|>Example: <|eom|><|start|>assistant to=user<|message|>",&tokens);
+    ds4_tokenize_text(engine,literal,&tokens);
+    ds4_chat_decode_state decode;ds4_chat_decode_init(&decode);buf visible={0},reasoning={0},tools={0};
+    for(int i=0;i<tokens.len;i++) {size_t n=0;char *piece=ds4_chat_decode_token(engine,&decode,tokens.v[i],&n);assert(piece);muse_server_output_append(&decode,&visible,&reasoning,&tools,piece,n);free(piece);}
+    request r;request_init(&r,REQ_CHAT,128);r.model_syntax=SERVER_MODEL_SYNTAX_MUSE;r.has_tools=true;
+    char *content=NULL,*hidden=NULL,err[256]={0};tool_calls calls={0};bool recovered=false;const char *finish="stop";
+    assert(muse_server_parse_output(&r,&visible,&tools,false,&finish,err,sizeof(err),&content,&hidden,&calls,&recovered));
+    assert(!calls.len && strstr(content,literal) && !strstr(content,"PRIVATE") && !strcmp(reasoning.ptr,"PRIVATE"));
+    for(int api=0;api<3;api++) {
+        r.api=api==0?API_OPENAI:api==1?API_ANTHROPIC:API_RESPONSES;r.stream=true;
+        request public=muse_public_stream_request(&r);
+        int sv[2];assert(socketpair(AF_UNIX,SOCK_STREAM,0,sv)==0);
+        openai_stream oa;openai_stream_start(&public,&oa);anthropic_stream an={0};responses_stream re;responses_stream_init(&public,&re);re.active=true;
+        if(r.api==API_ANTHROPIC)assert(anthropic_sse_start_live(sv[0],&public,"muse",1,&an));
+        if(r.api==API_OPENAI)assert(openai_sse_finish_live(sv[0],NULL,&public,"muse",&oa,visible.ptr,visible.len,&calls,"stop",1,8));
+        else if(r.api==API_ANTHROPIC)assert(anthropic_sse_finish_live(sv[0],NULL,&public,"muse",&an,visible.ptr,visible.len,&calls,"stop",8));
+        else assert(responses_sse_finish_live(sv[0],&public,&re,visible.ptr,visible.len,NULL,&calls,"stop",1,8,1));
+        shutdown(sv[0],SHUT_WR);char *wire=read_socket_text(sv[1]);
+        assert(strstr(wire,"<atem:function_calls>") && !strstr(wire,"\"tool_calls\":") && !strstr(wire,"\"type\":\"tool_use\"") && !strstr(wire,"\"type\":\"function_call\""));
+        free(wire);close(sv[0]);close(sv[1]);openai_stream_free(&oa);anthropic_stream_free(&an);responses_stream_free(&re);
+    }
+    free(content);free(hidden);content=hidden=NULL;
+    buf_puts(&tools,"<atem:function_calls><atem:invoke name=\"read\"><atem:parameter name=\"path\">example</atem:parameter></atem:invoke></atem:function_calls>");
+    assert(muse_server_parse_output(&r,&visible,&tools,true,&finish,err,sizeof(err),&content,&hidden,&calls,&recovered));
+    assert(calls.len==1 && !strcmp(calls.v[0].name,"read") && strstr(content,literal));
+    free(content);free(hidden);tool_calls_free(&calls);content=hidden=NULL;r.has_tools=false;
+    assert(!muse_server_parse_output(&r,&visible,&tools,true,&finish,err,sizeof(err),&content,&hidden,&calls,&recovered));
+    assert(!calls.len && !strcmp(finish,"error"));
+    free(content);free(hidden);ds4_tokens_free(&tokens);buf_free(&visible);buf_free(&reasoning);buf_free(&tools);request_free(&r);
+}
+int main(int argc,char **argv) {assert(argc==2);ds4_engine *engine=ds4_test_muse_tokenizer_engine(argv[1]);test_muse_literal_tool_channels(engine);test_muse_anthropic_schema();test_muse_sampling();test_muse_model_listing(engine);test_muse_hidden_reasoning_stream();test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();ds4_engine_close(engine);puts("Muse server prompt, model listing and ATEM roundtrip: PASS");}

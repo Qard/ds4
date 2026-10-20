@@ -7,7 +7,7 @@ import tempfile
 import threading
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from muse_live_api import parse_sse, visible_text, tool_continuation, check_public_text, check_no_reasoning, request_body, requested_effort
+from muse_live_api import parse_sse, visible_text, tool_continuation, check_public_text, check_no_reasoning, request_body, requested_effort, TOOL_LITERAL
 
 class LiveApiTests(unittest.TestCase):
     def test_sse_channels_and_completion(self):
@@ -38,6 +38,12 @@ class LiveApiTests(unittest.TestCase):
             body=request_body('responses','muse-spark-open','Reply MUSE_OK',reasoning=enabled)
             self.assertNotIn('reasoning_effort',body)
             self.assertEqual(body['reasoning']['effort'],'high' if enabled else 'none')
+
+    def test_public_atem_is_literal_only_with_no_tool_events(self):
+        wire=b'data: {"choices":[{"delta":{"content":"<atem:function_calls>example"}}]}\n\ndata: [DONE]\n\n'
+        self.assertEqual(parse_sse(io.BytesIO(wire),'openai',allow_atem=True),'<atem:function_calls>example')
+        tool=b'data: {"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}\n\ndata: [DONE]\n\n'
+        with self.assertRaises(ValueError):parse_sse(io.BytesIO(tool),'openai',allow_atem=True)
 
     def test_other_api_streams(self):
         cases=[('anthropic',[
@@ -91,8 +97,8 @@ class LiveHttpHarnessTests(unittest.TestCase):
                         self.server.test.assertEqual(last['content'][0]['tool_use_id'],'call_a');text=last['content'][0]['content']
                     else:
                         self.server.test.assertEqual(last['call_id'],'call_a');text=last['output']
-                else: text='<think>public</think>' if '<think>' in last['content'] else 'MUSE_OK'
-                tool=bool(body.get('tools')) and not is_result
+                else: text=TOOL_LITERAL if 'literal documentation' in last['content'] else '323' if '17 times 19' in last['content'] else '<think>public</think>' if '<think>' in last['content'] else 'MUSE_OK'
+                tool=bool(body.get('tools')) and not is_result and text!=TOOL_LITERAL
                 call={'id':'call_a','type':'function','function':{'name':'validation_lookup','arguments':'{"key":"muse-check"}'}}
                 if api=='openai':
                     message={'role':'assistant','content':None if tool else text,'reasoning_content':'private'}
@@ -137,8 +143,8 @@ class LiveHttpHarnessTests(unittest.TestCase):
                 self.assertEqual(summary['status'],'PASS')
                 self.assertTrue((out/'models.response').exists())
                 self.assertTrue((out/'model-detail.response').exists())
-                self.assertEqual(len(summary['requests']),21)
-                self.assertEqual(len(received),19)
+                self.assertEqual(len(summary['requests']),27)
+                self.assertEqual(len(received),25)
         finally:
             server.shutdown();server.server_close();thread.join()
 

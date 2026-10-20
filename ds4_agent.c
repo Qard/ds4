@@ -10408,7 +10408,12 @@ static int worker_finish_generated_token(agent_worker *w,
              * Only messages addressed outside self enter the tool parser. */
             if(ds4_think_mode_enabled(effective_think_mode(w->cfg)))
                 for (size_t i = 0; i < text_len; i++) renderer_write_char(stream->renderer, text[i]);
-        } else agent_stream_text(stream, text, text_len, false);
+        } else if(stream->muse_decode.tool_call) agent_stream_text(stream,text,text_len,false);
+        else {
+            /* ATEM in a user/commentary body is ordinary text. Only a tool
+             * recipient can submit bytes to the executable-call parser. */
+            for(size_t i=0;i<text_len;i++) renderer_write_char(stream->renderer,text[i]);
+        }
     } else agent_stream_text(stream, text, text_len, false);
     free(text);
     (*generated)++;

@@ -56,6 +56,11 @@ headers for reasoning and ATEM tool calls, including consecutive tool messages.
 The OpenAI, Anthropic, and Responses adapters separate reasoning from visible
 content. Text containing literal `<think>` tags stays ordinary content.
 
+Only bodies addressed to a tool enter the executable ATEM parser. ATEM examples
+inside user-facing or commentary messages remain literal text. The server streams
+public text normally and validates the complete set of same-turn calls before
+emitting their API tool events at the native turn boundary.
+
 The published template always leaves the assistant recipient header open. Muse
 has no native zero-reasoning setting: `none` uses its minimum strength (8) and
 suppresses private `self` messages in CLI, agent, evaluation and API output.

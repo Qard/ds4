@@ -13981,8 +13981,12 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
     if (!rng) rng = UINT64_C(0x9e3779b97f4a7c15);
 decode_again:
     ;
-    buf text = {0},muse_reasoning={0};size_t muse_reasoning_emitted=0;
+    buf text = {0},muse_reasoning={0},muse_tools={0};size_t muse_reasoning_emitted=0;
     const bool muse_chat=j->req.kind==REQ_CHAT && j->req.model_syntax==SERVER_MODEL_SYNTAX_MUSE;
+    request muse_public_request;
+    const request *public_request=&j->req;
+    if(muse_chat) {muse_public_request=muse_public_stream_request(&j->req);public_request=&muse_public_request;}
+
     ds4_chat_decode_state muse_decode;ds4_chat_decode_init(&muse_decode);
     size_t plain_stream_pos = 0;
     size_t stop_scan_from = 0;
@@ -14125,8 +14129,10 @@ decode_again:
             kept++;
 
             trace_piece(s, trace_id, piece, piece_len);
-            if(muse_chat && muse_decode.reasoning) buf_append(&muse_reasoning,piece,piece_len);
-            else buf_append(&text, piece, piece_len);
+            if(muse_chat) muse_server_output_append(&muse_decode,&text,&muse_reasoning,&muse_tools,piece,piece_len);
+            else buf_append(&text,piece,piece_len);
+            const char *tool_text=muse_chat?(muse_tools.ptr?muse_tools.ptr:""):(text.ptr?text.ptr:"");
+            const size_t tool_text_len=muse_chat?muse_tools.len:text.len;
             const bool was_thinking = thinking.inside;
             if(muse_chat) {
                 thinking.inside=muse_decode.reasoning;
@@ -14140,13 +14146,13 @@ decode_again:
                 if (thinking.inside) {
                     dsml_decode_tracker_init(&dsml_tracker);
                     dsml_tracker.model_syntax = j->req.model_syntax;
-                    dsml_tracker.pos = text.len;
+                    dsml_tracker.pos = tool_text_len;
                 } else {
                     if (was_thinking) {
-                        const char *end = !muse_chat && text.ptr ? find_last_substr(text.ptr, "</think>") : NULL;
-                        dsml_tracker.pos = muse_chat ? dsml_tracker.pos : end ? (size_t)(end + 8 - text.ptr) : text.len;
+                        const char *end = !muse_chat && tool_text ? find_last_substr(tool_text, "</think>") : NULL;
+                        dsml_tracker.pos = muse_chat ? dsml_tracker.pos : end ? (size_t)(end + 8 - tool_text) : tool_text_len;
                     }
-                    dsml_decode_tracker_update(&dsml_tracker, text.ptr, text.len);
+                    dsml_decode_tracker_update(&dsml_tracker, tool_text, tool_text_len);
                 }
             }
 
@@ -14179,7 +14185,7 @@ decode_again:
                 plain_stream_pos = stream_len;
             }
             if (j->req.stream && j->req.api == API_ANTHROPIC &&
-                !anthropic_sse_stream_update(j->fd, s, &j->req, id,
+                !anthropic_sse_stream_update(j->fd, s, public_request, id,
                                              &anthropic_live, text.ptr, stream_len,
                                              false)) {
                 job_mark_cancelled(j);
@@ -14190,7 +14196,7 @@ decode_again:
                 break;
             }
             if (openai_live_chat &&
-                !openai_sse_stream_update(j->fd, s, &j->req, id,
+                !openai_sse_stream_update(j->fd, s, public_request, id,
                                           &openai_live, text.ptr, stream_len,
                                           false)) {
                 job_mark_cancelled(j);
@@ -14201,7 +14207,7 @@ decode_again:
                 break;
             }
             if (responses_live_chat &&
-                !responses_sse_stream_update(j->fd, &j->req,
+                !responses_sse_stream_update(j->fd, public_request,
                                              &responses_live, text.ptr, stream_len,
                                              false)) {
                 job_mark_cancelled(j);
@@ -14213,14 +14219,14 @@ decode_again:
             }
             free(piece);
 
-            if (j->req.kind == REQ_CHAT && j->req.has_tools) {
+            if (j->req.kind == REQ_CHAT && j->req.has_tools && (!muse_chat || muse_decode.tool_call)) {
                 if (thinking_gates_tool_markers && thinking.inside) {
                     /* Do not act on an opening marker alone: it can be quoted
                      * protocol text. A complete block is unambiguous enough to
                      * recover without asking the model to restart it after an
                      * injected close marker. */
                     if (complete_tool_call_inside_thinking(
-                            j->req.model_syntax, text.ptr, text.len, &think_recovery_scan_from)) {
+                            j->req.model_syntax, tool_text, tool_text_len, &think_recovery_scan_from)) {
                         saw_tool_start = true;
                         saw_tool_end = true;
                         finish = "tool_calls";
@@ -14237,16 +14243,16 @@ decode_again:
                         break;
                     }
                     tool_scan_waiting_for_think_close = true;
-                    tool_scan_from = text.len;
+                    tool_scan_from = tool_text_len;
                 } else {
                     if (tool_scan_waiting_for_think_close) {
-                        const char *think_end = find_last_substr(text.ptr, "</think>");
-                        tool_scan_from = think_end ? (size_t)((think_end + 8) - text.ptr) : text.len;
-                        if (tool_scan_from > text.len) tool_scan_from = text.len;
+                        const char *think_end = find_last_substr(tool_text, "</think>");
+                        tool_scan_from = think_end ? (size_t)((think_end + 8) - tool_text) : tool_text_len;
+                        if (tool_scan_from > tool_text_len) tool_scan_from = tool_text_len;
                         tool_scan_waiting_for_think_close = false;
                     }
-                    if (tool_scan_from > text.len) tool_scan_from = text.len;
-                    const char *tool_scan = text.ptr ? text.ptr + tool_scan_from : "";
+                    if (tool_scan_from > tool_text_len) tool_scan_from = tool_text_len;
+                    const char *tool_scan = tool_text ? tool_text + tool_scan_from : "";
                     bool orphan_end = false;
                     bool old_start = saw_tool_start;
                     bool old_end = saw_tool_end;
@@ -14271,7 +14277,7 @@ decode_again:
                         trace_event(s, trace_id, "closed tool-call block after %d generated tokens", completion);
                     }
                     const size_t marker_hold = 80;
-                    size_t hold_from = text.len > marker_hold ? text.len - marker_hold : 0;
+                    size_t hold_from = tool_text_len > marker_hold ? tool_text_len - marker_hold : 0;
                     if (hold_from > tool_scan_from) tool_scan_from = hold_from;
                     if (s->trace && completion >= next_tool_progress) {
                         trace_event(s, trace_id,
@@ -14351,7 +14357,7 @@ decode_again:
         anthropic_stream_free(&anthropic_live);
         openai_stream_free(&openai_live);
         responses_stream_free(&responses_live);
-        buf_free(&muse_reasoning);buf_free(&text);
+        buf_free(&muse_tools);buf_free(&muse_reasoning);buf_free(&text);
         ds4_tokens_free(&effective_prompt);
         return;
     }
@@ -14436,7 +14442,7 @@ decode_again:
                                 "tool-error continuation appended %d tokens",
                                 recovery_tokens);
                     buf_free(&repaired);
-                    buf_free(&muse_reasoning);buf_free(&text);
+                    buf_free(&muse_tools);buf_free(&muse_reasoning);buf_free(&text);
                     goto decode_again;
                 }
                 finish = "error";
@@ -14477,7 +14483,7 @@ decode_again:
         anthropic_stream_free(&anthropic_live);
         openai_stream_free(&openai_live);
         responses_stream_free(&responses_live);
-        buf_free(&muse_reasoning);buf_free(&text);
+        buf_free(&muse_tools);buf_free(&muse_reasoning);buf_free(&text);
         ds4_tokens_free(&effective_prompt);
         return;
     }
@@ -14488,7 +14494,11 @@ decode_again:
     const char *final_finish = finish;
     bool recovered_tool_parse_failure = false;
     if (j->req.kind == REQ_CHAT) {
-        bool parsed_ok = parse_generated_message_for_response_for_syntax(
+        bool parsed_ok = muse_chat ?
+            muse_server_parse_output(&j->req,&text,&muse_tools,saw_tool_start,
+                &final_finish,err,sizeof(err),&parsed_content,&parsed_reasoning,
+                &parsed_calls,&recovered_tool_parse_failure) :
+            parse_generated_message_for_response_for_syntax(
             j->req.model_syntax,
             text.ptr ? text.ptr : "",
             j->req.has_tools,
@@ -14540,7 +14550,7 @@ decode_again:
                     free(parsed_content);
                     free(parsed_reasoning);
                     tool_calls_free(&parsed_calls);
-                    buf_free(&muse_reasoning);buf_free(&text);
+                    buf_free(&muse_tools);buf_free(&muse_reasoning);buf_free(&text);
                     goto decode_again;
                 }
                 final_finish = "error";
@@ -14589,7 +14599,7 @@ decode_again:
             anthropic_stream_free(&anthropic_live);
             openai_stream_free(&openai_live);
             responses_stream_free(&responses_live);
-            buf_free(&muse_reasoning);buf_free(&text);
+            buf_free(&muse_tools);buf_free(&muse_reasoning);buf_free(&text);
             ds4_tokens_free(&effective_prompt);
             return;
         }
@@ -14614,7 +14624,7 @@ decode_again:
         anthropic_stream_free(&anthropic_live);
         openai_stream_free(&openai_live);
         responses_stream_free(&responses_live);
-        buf_free(&muse_reasoning);buf_free(&text);
+        buf_free(&muse_tools);buf_free(&muse_reasoning);buf_free(&text);
         ds4_tokens_free(&effective_prompt);
         return;
     }
@@ -14694,11 +14704,11 @@ decode_again:
     bool response_ok = !job_cancelled(j);
     if (response_ok && j->req.stream) {
         if (j->req.api == API_ANTHROPIC) {
-            response_ok = anthropic_sse_finish_live(j->fd, s, &j->req, id, &anthropic_live,
+            response_ok = anthropic_sse_finish_live(j->fd, s, public_request, id, &anthropic_live,
                                                     text.ptr ? text.ptr : "", text.len,
                                                     &parsed_calls, final_finish, completion);
         } else if (openai_live_chat) {
-            response_ok = openai_sse_finish_live(j->fd, s, &j->req, id, &openai_live,
+            response_ok = openai_sse_finish_live(j->fd, s, public_request, id, &openai_live,
                                                  text.ptr ? text.ptr : "", text.len,
                                                  &parsed_calls, final_finish,
                                                  prompt_tokens, completion);
@@ -14709,7 +14719,7 @@ decode_again:
              * streamed and the diff is empty. */
             const char *recover =
                 recovered_tool_parse_failure ? parsed_content : NULL;
-            response_ok = responses_sse_finish_live(j->fd, &j->req, &responses_live,
+            response_ok = responses_sse_finish_live(j->fd, public_request, &responses_live,
                                                     text.ptr ? text.ptr : "", text.len,
                                                     recover,
                                                     &parsed_calls, final_finish,
@@ -14822,7 +14832,7 @@ decode_again:
     anthropic_stream_free(&anthropic_live);
     openai_stream_free(&openai_live);
     responses_stream_free(&responses_live);
-    buf_free(&muse_reasoning);buf_free(&text);
+    buf_free(&muse_tools);buf_free(&muse_reasoning);buf_free(&text);
     ds4_tokens_free(&effective_prompt);
 }
 
