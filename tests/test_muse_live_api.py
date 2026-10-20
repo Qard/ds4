@@ -7,7 +7,7 @@ import tempfile
 import threading
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from muse_live_api import parse_sse, visible_text, tool_continuation, check_public_text, check_no_reasoning, request_body
+from muse_live_api import parse_sse, visible_text, tool_continuation, check_public_text, check_no_reasoning, request_body, requested_effort
 
 class LiveApiTests(unittest.TestCase):
     def test_sse_channels_and_completion(self):
@@ -32,6 +32,12 @@ class LiveApiTests(unittest.TestCase):
         self.assertEqual(body['top_p'],1)
         self.assertEqual(body['min_p'],0)
         self.assertGreaterEqual(body['max_tokens'],1024)
+
+    def test_responses_uses_nested_reasoning_effort(self):
+        for enabled in (False,True):
+            body=request_body('responses','muse-spark-open','Reply MUSE_OK',reasoning=enabled)
+            self.assertNotIn('reasoning_effort',body)
+            self.assertEqual(body['reasoning']['effort'],'high' if enabled else 'none')
 
     def test_other_api_streams(self):
         cases=[('anthropic',[
@@ -107,7 +113,7 @@ class LiveHttpHarnessTests(unittest.TestCase):
                     events=[{'type':'response.reasoning_summary_text.delta','delta':'private'},
                             {'type':'response.output_text.delta','delta':text},
                             {'type':'response.completed','response':result}]
-                if body.get('reasoning_effort')=='none':
+                if requested_effort(body)=='none':
                     events=events[1:]
                     if api=='openai':result['choices'][0]['message'].pop('reasoning_content',None)
                 if body.get('stream'):

@@ -116,7 +116,9 @@ def request_body(api,model,text,stream=False,tools=False,reasoning=False):
     if reasoning:body.update(temperature=1,top_p=1,top_k=0,min_p=0,seed=12345)
     budget=2048 if reasoning else 512 if tools else 64
     messages=[{'role':'user','content':text}]
-    if api=='responses':body.update(input=messages,max_output_tokens=budget)
+    if api=='responses':
+        body.update(input=messages,max_output_tokens=budget,reasoning={'effort':body.pop('reasoning_effort')})
+        if reasoning:body['reasoning']['summary']='auto'
     else:body.update(messages=messages,max_tokens=budget)
     if api=='anthropic':body['thinking']={'type':'enabled','budget_tokens':256} if reasoning else {'type':'disabled'}
     if tools:
@@ -124,6 +126,10 @@ def request_body(api,model,text,stream=False,tools=False,reasoning=False):
         elif api=='anthropic':body['tools']=[{'name':LOOKUP['name'],'description':LOOKUP['description'],'input_schema':LOOKUP['parameters']}]
         else:body['tools']=[{'type':'function',**LOOKUP}]
     return body
+
+
+def requested_effort(body):
+    return body.get('reasoning_effort',(body.get('reasoning') or {}).get('effort'))
 
 
 class LiveClient:
@@ -156,10 +162,10 @@ class LiveClient:
                 for line in response:fp.write(line)
         path=self.output/f'{name}.response'
         if body.get('stream'):
-            with path.open('rb') as fp:result=parse_sse(fp,api,allow_reasoning=body.get('reasoning_effort')!='none')
+            with path.open('rb') as fp:result=parse_sse(fp,api,allow_reasoning=requested_effort(body)!='none')
         else:
             result=json.loads(path.read_bytes())
-            if body.get('reasoning_effort')=='none':check_no_reasoning(api,result)
+            if requested_effort(body)=='none':check_no_reasoning(api,result)
         self.results.append({'name':name,'api':api,'seconds':time.monotonic()-start})
         return result
 

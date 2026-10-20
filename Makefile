@@ -1580,3 +1580,7 @@ tests/test_muse_cli: tests/test_muse_cli.o tests/muse_tokenizer_engine.o ds4_hel
 .PHONY: test-muse-cli
 test-muse-cli: tests/test_muse_cli
 	uv run --script tests/muse_frontend_reference.py ./tests/test_muse_cli
+
+.PHONY: test-muse-checkpoint-reference
+test-muse-checkpoint-reference:
+	uv run --with 'numpy>=2,<3' --with gguf==0.19.0 python -m unittest discover -s tests -p test_muse_checkpoint_reference.py -v

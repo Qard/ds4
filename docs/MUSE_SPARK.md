@@ -106,7 +106,7 @@ make test-muse-gguf test-muse-tokenizer
 make test-muse-chat test-muse-cli test-muse-server test-muse-agent test-muse-eval test-muse-engine
 make test-muse-metal test-muse-attention test-muse-experts test-muse-quant
 make test-muse-graph test-muse-session test-muse-memory
-uv run --with huggingface-hub==2.2.0 --with 'numpy>=2,<3' \
+uv run --with huggingface-hub==2.2.0 --with 'numpy>=2,<3' --with gguf==0.19.0 \
   python -m unittest discover -s tests -p 'test_muse_*.py'
 ```
 
@@ -207,3 +207,27 @@ across batch sizes, and the complete packed graph again requires exact agreement
 between its all-row and last-row output heads. Independent NumPy checks still
 pass. These results establish short-prefix numerical consistency, rather than
 an independent full-checkpoint golden-logit comparison or end-to-end readiness.
+
+## Independent checkpoint arithmetic
+
+`tests/muse_checkpoint_reference.py` computes one short prefix with NumPy and
+llama.cpp's Python GGUF quant decoder. It is a numerical diagnostic, with no
+sampling, conversation handling or production runner. It uses bounded reads of
+256 matrix rows and only the routed experts, without mapping the checkpoint or
+allocating a model-sized CPU cache. Prefixes are limited to 32 tokens. The small
+packed graph independently verifies this diagnostic before full-checkpoint use.
+
+Use prompt IDs saved by the native diagnostic, retaining a new output filename:
+
+```sh
+VECLIB_MAXIMUM_THREADS=4 uv run --script tests/muse_checkpoint_reference.py \
+  --model "$HOME/.ds4/models/muse-spark-open-native.gguf" \
+  --prompt-ids /tmp/muse-native-validation/prefill-32/raw.prompt.i32 \
+  --output /tmp/muse-raw-reference.f32
+```
+
+The output is all 202,048 FP32 logits at the final prompt token. Compare it with
+the first vocabulary vector in the native `raw.logits.f32`, rather than a vector
+after generated continuation tokens. Close resident model processes for an
+uncontended comparison. This calculation is intentionally slow and independent
+of the native Metal execution path.
