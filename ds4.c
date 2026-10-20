@@ -44671,7 +44671,7 @@ static void encode_chat_prompt(
         muse_chat_system(vocab,system,think_mode,out);
         muse_chat_open(vocab,"user",out);muse_chat_content(vocab,prompt,out);
         token_vec_push(out,vocab->eos_id);
-        muse_chat_assistant_prefix(vocab,think_mode,out);
+        muse_chat_assistant_prefix(vocab,out);
         return;
     }
     if (ds4_model_is_qwen4()) {
@@ -44966,7 +44966,7 @@ void ds4_chat_append_message(ds4_engine *e, ds4_tokens *tokens, const char *role
 }
 
 void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_mode think_mode) {
-    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {muse_chat_assistant_prefix(&e->vocab,think_mode,tokens);return;}
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {muse_chat_assistant_prefix(&e->vocab,tokens);return;}
     if (ds4_model_is_qwen4()) {
         qwen4_chat_assistant_prefix(&e->vocab, think_mode, tokens);
         return;
@@ -45116,10 +45116,10 @@ bool ds4_token_is_thinking_control(ds4_engine *e, int token) {
             token == e->vocab.think_end_id);
 }
 
-void ds4_chat_decode_init(ds4_chat_decode_state *state, ds4_think_mode mode) {
+void ds4_chat_decode_init(ds4_chat_decode_state *state) {
+    /* Muse's published template always leaves the recipient header open.
+     * Effort controls generation and presentation, not message framing. */
     memset(state,0,sizeof(*state));
-    state->body=!ds4_think_mode_enabled(mode);
-    state->final_answer=state->body;
 }
 
 char *ds4_chat_decode_token(ds4_engine *e,ds4_chat_decode_state *state,int token,size_t *len) {
@@ -45154,6 +45154,21 @@ char *ds4_chat_decode_token(ds4_engine *e,ds4_chat_decode_state *state,int token
         state->header[state->header_len]=0;*len=0;piece[0]=0;
     }
     return piece;
+}
+
+int ds4_chat_decode_prefix(ds4_engine *e,ds4_chat_decode_state *state,const ds4_tokens *prefix) {
+    ds4_chat_decode_init(state);
+    if(!ds4_engine_is_muse(e) || !prefix) return 0;
+    if(prefix->len<0 || (prefix->len && !prefix->v)) return 1;
+    int start=prefix->len;
+    while(start>0 && prefix->v[start-1]!=e->vocab.muse_start_id) start--;
+    if(!start) return 0;
+    for(int i=start;i<prefix->len;i++) {
+        size_t n=0;char *piece=ds4_chat_decode_token(e,state,prefix->v[i],&n);
+        if(!piece) return 1;
+        free(piece);
+    }
+    return 0;
 }
 
 bool ds4_token_is_stop_for_think_mode(

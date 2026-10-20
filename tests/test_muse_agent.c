@@ -14,13 +14,14 @@ static void feed(agent_worker *w, agent_stream_renderer *stream, const char *tex
 }
 
 static void test_semantic_stream(agent_worker *w) {
+    w->trace=tmpfile();assert(w->trace);
     agent_tail_capture tail = {.cap = 16384};
     agent_token_renderer renderer = {.engine = w->engine, .worker = w,
         .capture = &tail, .last_output_newline = true};
     agent_dsml_parser parser = {.syntax = AGENT_TOOL_SYNTAX_MUSE};
     agent_stream_renderer stream = {.renderer = &renderer, .parser = &parser,
         .syntax = AGENT_TOOL_SYNTAX_MUSE};
-    feed(w, &stream, "<|start|>assistant to=self<|message|>Private planning: "
+    feed(w, &stream, " to=self<|message|>Private planning: "
         "<atem:function_calls><atem:invoke name=\"bash\"></atem:invoke></atem:function_calls>");
     AGENT_TEST_ASSERT(renderer.in_think && parser.calls.len == 0);
     feed(w, &stream, "<|eom|><|start|>assistant to=commentary<|message|>"
@@ -38,6 +39,11 @@ static void test_semantic_stream(agent_worker *w) {
     if (parser.calls.len == 2) AGENT_TEST_ASSERT(!strcmp(parser.calls.v[0].name, "list") && !strcmp(parser.calls.v[1].name, "read"));
     AGENT_TEST_ASSERT(!strstr(out, "<|start|>") && !strstr(out, "to=self"));
     AGENT_TEST_ASSERT(strstr(out, "Visible <think>literal</think>.") != NULL);
+    if(!ds4_think_mode_enabled(w->cfg->gen.think_mode)) AGENT_TEST_ASSERT(!strstr(out,"Private planning"));
+    rewind(w->trace);char traced[32768]={0};
+    assert(fread(traced,1,sizeof(traced)-1,w->trace)>0);
+    AGENT_TEST_ASSERT(strstr(traced,"<|message|>")!=NULL);
+    fclose(w->trace);w->trace=NULL;
     free(out);agent_dsml_parser_free(&parser);ds4_tokens_free(&w->transcript);
 }
 
@@ -104,6 +110,12 @@ int main(int argc, char **argv) {
     agent_config cfg = {0};cfg.gen.think_mode = DS4_THINK_MAX;
     cfg.gen.system = "Follow the user. Keep <|start|> literal.";
     agent_worker w = {.engine = ds4_test_muse_tokenizer_engine(argv[1]), .cfg = &cfg};
+    agent_generation_options defaults={.min_p=.05f};agent_apply_model_sampling_defaults(w.engine,&defaults);
+    AGENT_TEST_ASSERT(defaults.temperature==1 && defaults.top_p==1 && defaults.min_p==0);
+    agent_generation_options explicit={.temperature=.2f,.top_p=.4f,.min_p=.7f,
+        .temperature_set=true,.top_p_set=true,.min_p_set=true};
+    agent_apply_model_sampling_defaults(w.engine,&explicit);
+    AGENT_TEST_ASSERT(explicit.temperature==.2f && explicit.top_p==.4f && explicit.min_p==.7f);
     pthread_mutex_init(&w.mu, NULL);
     ds4_tokens tokens = {0};agent_worker_build_system_tokens(&w, &tokens);
     size_t n = 0;char *text = ds4_kvstore_render_tokens_text(w.engine, &tokens, &n);
@@ -117,6 +129,7 @@ int main(int argc, char **argv) {
     AGENT_TEST_ASSERT(first && !strstr(first + 1, "<|start|>system"));
     free(text);ds4_tokens_free(&tokens);
     test_semantic_stream(&w);
+    cfg.gen.think_mode=DS4_THINK_NONE;test_semantic_stream(&w);
     test_tool_results(&w);
     test_history(&w);
     test_tail_boundary(&w);

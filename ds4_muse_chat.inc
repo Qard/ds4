@@ -86,10 +86,9 @@ static void muse_chat_system(const ds4_vocab *vocab,const char *system,ds4_think
     muse_chat_open(vocab,"system",out);bpe_tokenize_text(vocab,text,out);free(text);
     token_vec_push(out,vocab->eos_id);
 }
-static void muse_chat_assistant_prefix(const ds4_vocab *vocab,ds4_think_mode mode,token_vec *out) {
+static void muse_chat_assistant_prefix(const ds4_vocab *vocab,token_vec *out) {
     token_vec_push(out,vocab->muse_start_id);
-    bpe_tokenize_text(vocab,ds4_think_mode_enabled(mode)?"assistant":"assistant to=user",out);
-    if(!ds4_think_mode_enabled(mode)) token_vec_push(out,vocab->muse_message_id);
+    bpe_tokenize_text(vocab,"assistant",out);
 }
 
 /* Protocol instructions from the published chat template. Schema adapters

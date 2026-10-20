@@ -1347,7 +1347,7 @@ ds4_cpu_test_hooks.o ds4_cuda_test_hooks.o tests/test_session_state.o \
 tests/test_session_state_gpu.o: ds4_tool_text.h
 
 clean:
-	rm -f tests/test_muse_native_live tests/test_muse_metal tests/test_muse_gguf tests/test_muse_attention tests/test_muse_experts tests/test_muse_graph tests/test_muse_tokenizer tests/test_muse_session tests/test_muse_memory tests/test_muse_chat tests/test_muse_decode tests/test_muse_server tests/test_muse_agent tests/test_muse_eval tests/test_muse_quant
+	rm -f tests/test_muse_cli tests/test_muse_native_live tests/test_muse_metal tests/test_muse_gguf tests/test_muse_attention tests/test_muse_experts tests/test_muse_graph tests/test_muse_tokenizer tests/test_muse_session tests/test_muse_memory tests/test_muse_chat tests/test_muse_decode tests/test_muse_server tests/test_muse_agent tests/test_muse_eval tests/test_muse_quant
 	rm -f tests/test_mmvq_cuda tests/test_mmvq_rocm
 	rm -f tests/test_qwen4_ngrams
 	rm -f tests/test_qwen4_ngram_state
@@ -1572,3 +1572,11 @@ tests/test_muse_native_live.o: tests/test_muse_native_live.c tests/muse_native_c
 tests/test_muse_native_live: tests/test_muse_native_live.o $(CORE_OBJS)
 	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $^ $(METAL_LDLIBS)
 tests/test_muse_session.o: tests/muse_native_check.h
+
+tests/test_muse_cli.o: tests/test_muse_cli.c ds4_cli.c ds4.h
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
+tests/test_muse_cli: tests/test_muse_cli.o tests/muse_tokenizer_engine.o ds4_help.o ds4_prompt_prefix.o ds4_gpu_args.o linenoise.o ds4_engram.o $(filter-out ds4_cpu.o,$(CPU_CORE_OBJS))
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+.PHONY: test-muse-cli
+test-muse-cli: tests/test_muse_cli
+	uv run --script tests/muse_frontend_reference.py ./tests/test_muse_cli

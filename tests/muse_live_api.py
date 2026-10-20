@@ -23,6 +23,14 @@ def check_public_text(text):
         raise ValueError('native protocol controls leaked into public text')
 
 
+def check_no_reasoning(api,result):
+    if api=='openai':
+        leaked=any(c['message'].get('reasoning_content') or c['message'].get('reasoning') for c in result['choices'])
+    elif api=='anthropic':leaked=any(b['type']=='thinking' for b in result['content'])
+    else:leaked=any(b['type']=='reasoning' for b in result['output'])
+    if leaked:raise ValueError('disabled reasoning leaked into the API response')
+
+
 def visible_text(api,result):
     if 'error' in result: raise ValueError(str(result['error']))
     if api=='openai':
@@ -37,7 +45,7 @@ def visible_text(api,result):
                    for b in item.get('content',[]) if b['type']=='output_text')
 
 
-def parse_sse(lines,api):
+def parse_sse(lines,api,allow_reasoning=True):
     parts=[];complete=False;data=[]
     def event():
         nonlocal complete
@@ -49,6 +57,11 @@ def parse_sse(lines,api):
         value=json.loads(raw)
         if 'error' in value or value.get('type') in ('error','response.failed','response.incomplete'):
             raise ValueError(str(value))
+        private=((api=='openai' and any(c.get('delta',{}).get('reasoning_content') for c in value.get('choices',[]))) or
+                 (api=='anthropic' and (value.get('delta',{}).get('type')=='thinking_delta' or
+                                       value.get('content_block',{}).get('type')=='thinking')) or
+                 (api=='responses' and value.get('type','').startswith('response.reasoning')))
+        if private and not allow_reasoning:raise ValueError('disabled reasoning leaked into SSE')
         if api=='openai':
             for choice in value.get('choices',[]):
                 if choice.get('finish_reason')=='length':raise ValueError('output token budget exhausted')
@@ -100,9 +113,11 @@ def tool_continuation(api,result,token):
 
 def request_body(api,model,text,stream=False,tools=False,reasoning=False):
     body={'model':model,'temperature':0,'stream':stream,'reasoning_effort':'high' if reasoning else 'none'}
+    if reasoning:body.update(temperature=1,top_p=1,top_k=0,min_p=0,seed=12345)
+    budget=2048 if reasoning else 512 if tools else 64
     messages=[{'role':'user','content':text}]
-    if api=='responses':body.update(input=messages,max_output_tokens=512 if tools or reasoning else 64)
-    else:body.update(messages=messages,max_tokens=512 if tools or reasoning else 64)
+    if api=='responses':body.update(input=messages,max_output_tokens=budget)
+    else:body.update(messages=messages,max_tokens=budget)
     if api=='anthropic':body['thinking']={'type':'enabled','budget_tokens':256} if reasoning else {'type':'disabled'}
     if tools:
         if api=='openai':body['tools']=[{'type':'function','function':LOOKUP}]
@@ -141,8 +156,10 @@ class LiveClient:
                 for line in response:fp.write(line)
         path=self.output/f'{name}.response'
         if body.get('stream'):
-            with path.open('rb') as fp:result=parse_sse(fp,api)
-        else:result=json.loads(path.read_bytes())
+            with path.open('rb') as fp:result=parse_sse(fp,api,allow_reasoning=body.get('reasoning_effort')!='none')
+        else:
+            result=json.loads(path.read_bytes())
+            if body.get('reasoning_effort')=='none':check_no_reasoning(api,result)
         self.results.append({'name':name,'api':api,'seconds':time.monotonic()-start})
         return result
 

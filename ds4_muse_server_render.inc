@@ -31,6 +31,7 @@ static char *muse_tools_prompt(const char *schemas,buf *recipients) {
             const char *name=muse_json_field(&fields,"name");
             const char *desc=muse_json_field(&fields,"description");
             const char *params=muse_json_field(&fields,"parameters");
+            if(!params) params=muse_json_field(&fields,"input_schema");
             const char *deferred=muse_json_field(&fields,"defer_loading");
             if(name && name[0]) {
                 if(first) {buf_puts(recipients,"\"[func_name] (e.g., ");append_muse_header_text(recipients,name);buf_puts(recipients,")\", ");first=false;}
@@ -119,16 +120,16 @@ static char *render_muse_chat(const chat_msgs *source,int start,const char *sche
             append_muse_attr(&out,name);buf_puts(&out,"\">\n");append_muse_text(&out,m->content);buf_puts(&out,"\n</tool_output><|eot|>");
         } else {muse_message_open(&out,role_is_system(role)?role:"user");append_muse_text(&out,m->content);buf_puts(&out,"<|eot|>");}
     }
-    buf_puts(&out,ds4_think_mode_enabled(mode)?"<|start|>assistant":"<|start|>assistant to=user<|message|>");
+    buf_puts(&out,"<|start|>assistant");
     free(views.v);chat_msgs_free(&fragments);return buf_take(&out);
 }
 
-static char *build_muse_assistant_suffix(const request *r,const char *content,
+static char *build_muse_assistant_suffix(const char *content,
         const char *reasoning,bool with_reasoning,const tool_calls *calls) {
     chat_msg m={.content=(char *)content,.reasoning=with_reasoning?(char *)reasoning:NULL};
     if(calls) m.calls=*calls;
     buf full={0},suffix={0};append_muse_assistant(&full,&m,false);
-    const char *prefix=r && ds4_think_mode_enabled(r->think_mode)?"<|start|>assistant":"<|start|>assistant to=user<|message|>";
+    const char *prefix="<|start|>assistant";
     size_t n=strlen(prefix);
     if(full.len>=n && !memcmp(full.ptr,prefix,n)) buf_append(&suffix,full.ptr+n,full.len-n);
     else {buf_puts(&suffix,"<|eom|>");buf_puts(&suffix,full.ptr?full.ptr:"");}

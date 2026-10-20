@@ -4,6 +4,7 @@
 static bool muse_sse_reasoning_update(int fd,const request *r,const char *id,
         openai_stream *openai,anthropic_stream *anthropic,responses_stream *responses,
         const buf *reasoning,size_t *emitted,bool inside) {
+    if(!ds4_think_mode_enabled(r->think_mode)) {*emitted=reasoning->len;return true;}
     size_t limit=utf8_stream_safe_len(reasoning->ptr?reasoning->ptr:"",*emitted,reasoning->len,!inside);
     if(limit>*emitted) {
         const char *p=reasoning->ptr+*emitted;size_t n=limit-*emitted;

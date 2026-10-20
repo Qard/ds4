@@ -8,8 +8,8 @@ def generated_code_text(raw,think,family):
             if '</think>' not in raw:raise ValueError('thinking did not finish')
             raw=raw.split('</think>',1)[1]
         return raw
-    public=not think;reading_header=think
-    header='assistant' if think else '';parts=[]
+    public=False;reading_header=True
+    header='assistant';parts=[]
     for piece in re.split(r'(<\|(?:start|message|eom|eot|end_of_text)\|>)',raw):
         if piece=='<|start|>':
             public=False;reading_header=True;header=''

@@ -495,15 +495,22 @@ static void token_printer_write_text(token_printer *p, const char *text, size_t 
     }
 }
 
+static int token_printer_set_prefix(token_printer *p,const ds4_tokens *prefix) {
+    if(!ds4_engine_is_muse(p->engine) || p->raw_output) return 0;
+    p->muse_decode_ready=true;
+    if(!ds4_chat_decode_prefix(p->engine,&p->decode,prefix)) return 0;
+    p->decode_failed=true;fprintf(stderr,"ds4: malformed Muse prefill header\n");return 1;
+}
+
 static void print_generated_token(void *ud, int token) {
     token_printer *p = ud;
     size_t len = 0;
     if(ds4_engine_is_muse(p->engine) && !p->raw_output) {
-        if(!p->muse_decode_ready) {ds4_chat_decode_init(&p->decode,p->format_thinking?DS4_THINK_HIGH:DS4_THINK_NONE);p->muse_decode_ready=true;}
+        if(!p->muse_decode_ready) {ds4_chat_decode_init(&p->decode);p->muse_decode_ready=true;}
         char *body=ds4_chat_decode_token(p->engine,&p->decode,token,&len);
         if(!body) {p->decode_failed=true;fprintf(stderr,"ds4: malformed Muse recipient header\n");return;}
         p->in_think=p->decode.reasoning;
-        if(len) {
+        if(len && (!p->in_think || p->format_thinking)) {
             if(p->use_color && p->in_think && !p->color_open) {fputs("\x1b[90m",p->fp);p->color_open=true;}
             if(p->use_color && !p->in_think && p->color_open) {fputs("\x1b[0m",p->fp);p->color_open=false;}
             fwrite(body,1,len,p->fp);p->last_output_newline=body[len-1]=='\n';
@@ -543,10 +550,10 @@ static void build_prompt(ds4_engine *engine, const cli_generation_options *gen, 
 static void cli_apply_model_sampling_defaults(
         ds4_engine             *engine,
         cli_generation_options *gen) {
-    if (!engine || !gen || !ds4_engine_is_glm_dsa(engine)) return;
+    if (!engine || !gen || (!ds4_engine_is_glm_dsa(engine) && !ds4_engine_is_muse(engine))) return;
 
     if (!gen->temperature_set) gen->temperature = 1.0f;
-    if (!gen->top_p_set) gen->top_p = 0.95f;
+    if (!gen->top_p_set) gen->top_p = ds4_engine_is_muse(engine) ? 1.0f : 0.95f;
     if (!gen->min_p_set) gen->min_p = 0.0f;
 }
 
@@ -575,6 +582,7 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
         .last_output_newline = true,
         .raw_output = cfg->gen.raw_prompt,
     };
+    if(token_printer_set_prefix(&printer,prompt)) {ds4_session_free(session);return 1;}
     cli_prefill_progress progress = {
         .base_tokens = 0,
         .input_tokens = prompt->len,
@@ -1271,7 +1279,8 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
                 .input_tokens = prompt.len,
                 .use_color = ds4_log_is_tty(stderr),
             };
-            rc = ds4_engine_generate_argmax(engine, &prompt, cfg->gen.n_predict,
+            rc = token_printer_set_prefix(&printer,&prompt);
+            if(!rc) rc = ds4_engine_generate_argmax(engine, &prompt, cfg->gen.n_predict,
                                             cfg->gen.ctx_size,
                                             print_generated_token,
                                             generation_done,
@@ -1587,7 +1596,7 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat,
         .raw_output = cfg->gen.raw_prompt,
     };
 
-    int max_tokens = cfg->gen.n_predict;
+    int max_tokens = token_printer_set_prefix(&printer,&chat->transcript)?0:cfg->gen.n_predict;
     int room = ds4_session_ctx(chat->session) - ds4_session_pos(chat->session);
     if (room <= 1) max_tokens = 0;
     else if (max_tokens > room - 1) max_tokens = room - 1;

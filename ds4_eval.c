@@ -4271,12 +4271,12 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
     ui->phase_start_sec = now_sec();
     ui->speed_tps = 0.0;
     byte_buf raw = {0};
-    ds4_chat_decode_state decode;ds4_chat_decode_init(&decode,think_mode);
+    ds4_chat_decode_state decode;ds4_chat_decode_init(&decode);
     bool plain_in_think = ds4_think_mode_enabled(think_mode);
     bool generation_in_think = ds4_think_mode_enabled(think_mode);
     eval_think_close_info think_close = {0};
     ds4_tokens think_close_tokens = {0};
-    if (generation_in_think) eval_build_think_close(engine, &think_close_tokens);
+    if (generation_in_think || muse) eval_build_think_close(engine, &think_close_tokens);
     if (!tty && plain_in_think) plain_set_thinking_color(use_plain_color);
     tui_refresh(ui, "thinking");
 
@@ -4414,10 +4414,11 @@ static eval_run_result run_one_case(ds4_engine *engine, ds4_session *session,
         double elapsed = now_sec() - ui->phase_start_sec;
         ui->speed_tps = elapsed > 0.001 ? (double)ui->generated / elapsed : 0.0;
 
+        bool show_piece=!muse || !decode.reasoning || ds4_think_mode_enabled(think_mode);
         if (tty) {
-            eval_project_piece(ui, engine, &decode, text, len, false);
+            if(show_piece) eval_project_piece(ui, engine, &decode, text, len, false);
             tui_refresh(ui, ui->in_think ? "thinking" : "answer");
-        } else {
+        } else if(show_piece) {
             if(muse && plain_in_think!=decode.reasoning) {
                 plain_in_think=decode.reasoning;
                 if(plain_in_think) plain_set_thinking_color(use_plain_color);

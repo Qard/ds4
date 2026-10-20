@@ -401,7 +401,9 @@ typedef struct {
     uint32_t header_len;
     bool body, reasoning, final_answer;
 } ds4_chat_decode_state;
-void ds4_chat_decode_init(ds4_chat_decode_state *state, ds4_think_mode mode);
+void ds4_chat_decode_init(ds4_chat_decode_state *state);
+/* Initialize from the final message header/body already present in a prefill. */
+int ds4_chat_decode_prefix(ds4_engine *e, ds4_chat_decode_state *state, const ds4_tokens *prefix);
 char *ds4_chat_decode_token(ds4_engine *e, ds4_chat_decode_state *state,
                             int token, size_t *len);
 int ds4_token_eos(ds4_engine *e);

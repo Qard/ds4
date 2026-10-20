@@ -7,7 +7,7 @@ import tempfile
 import threading
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from muse_live_api import parse_sse, visible_text, tool_continuation, check_public_text
+from muse_live_api import parse_sse, visible_text, tool_continuation, check_public_text, check_no_reasoning, request_body
 
 class LiveApiTests(unittest.TestCase):
     def test_sse_channels_and_completion(self):
@@ -19,6 +19,19 @@ class LiveApiTests(unittest.TestCase):
             parse_sse(io.BytesIO(wire.replace(b'data: [DONE]\n\n',b'')),'openai')
         with self.assertRaises(ValueError):
             parse_sse(io.BytesIO(b'data: {"error":{"message":"bad"}}\n\n'),'openai')
+
+    def test_disabled_reasoning_cannot_leak(self):
+        result={'choices':[{'message':{'reasoning_content':'private'}}]}
+        with self.assertRaises(ValueError):check_no_reasoning('openai',result)
+        wire=b'data: {"choices":[{"delta":{"reasoning_content":"private"}}]}\n\ndata: [DONE]\n\n'
+        with self.assertRaises(ValueError):parse_sse(io.BytesIO(wire),'openai',allow_reasoning=False)
+
+    def test_reasoning_probe_uses_native_sampling(self):
+        body=request_body('openai','muse-spark-open','Reply MUSE_OK',reasoning=True)
+        self.assertEqual(body['temperature'],1)
+        self.assertEqual(body['top_p'],1)
+        self.assertEqual(body['min_p'],0)
+        self.assertGreaterEqual(body['max_tokens'],1024)
 
     def test_other_api_streams(self):
         cases=[('anthropic',[
@@ -94,6 +107,9 @@ class LiveHttpHarnessTests(unittest.TestCase):
                     events=[{'type':'response.reasoning_summary_text.delta','delta':'private'},
                             {'type':'response.output_text.delta','delta':text},
                             {'type':'response.completed','response':result}]
+                if body.get('reasoning_effort')=='none':
+                    events=events[1:]
+                    if api=='openai':result['choices'][0]['message'].pop('reasoning_content',None)
                 if body.get('stream'):
                     data=''.join('data: '+json.dumps(e)+'\n\n' for e in events)
                     if api=='openai':data+='data: [DONE]\n\n'

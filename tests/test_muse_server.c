@@ -102,4 +102,33 @@ static void test_muse_model_listing(ds4_engine *engine) {
     assert(!strstr(wire,"deepseek-v4-flash") && !strstr(wire,"deepseek-v4-pro"));
     free(wire);close(sv[0]);close(sv[1]);
 }
-int main(int argc,char **argv) {assert(argc==2);ds4_engine *engine=ds4_test_muse_tokenizer_engine(argv[1]);test_muse_model_listing(engine);test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();ds4_engine_close(engine);puts("Muse server prompt, model listing and ATEM roundtrip: PASS");}
+static void test_muse_hidden_reasoning_stream(void) {
+    int sv[2];assert(socketpair(AF_UNIX,SOCK_STREAM,0,sv)==0);
+    request r;request_init(&r,REQ_CHAT,128);r.model_syntax=SERVER_MODEL_SYNTAX_MUSE;
+    r.api=API_OPENAI;r.stream=true;r.think_mode=DS4_THINK_NONE;
+    thinking_state state={0};assert(should_remember_thinking_checkpoint(&r,&state,"stop"));
+    openai_stream oa;openai_stream_start(&r,&oa);anthropic_stream an={0};responses_stream re={0};
+    buf reasoning={0};buf_puts(&reasoning,"PRIVATE");size_t emitted=0;
+    assert(muse_sse_reasoning_update(sv[0],&r,"muse",&oa,&an,&re,&reasoning,&emitted,false));
+    shutdown(sv[0],SHUT_WR);char *wire=read_socket_text(sv[1]);assert(!strstr(wire,"PRIVATE"));
+    free(wire);close(sv[0]);close(sv[1]);buf_free(&reasoning);openai_stream_free(&oa);request_free(&r);
+}
+static void test_muse_sampling(void) {
+    request r; request_init(&r,REQ_CHAT,128);r.model_syntax=SERVER_MODEL_SYNTAX_MUSE;
+    for(int mode=DS4_THINK_NONE;mode<=DS4_THINK_HIGH;mode++) {
+        r.think_mode=mode;float t,p,m;int k;
+        request_sampling_values(&r,&t,&k,&p,&m);
+        assert(t==1 && k==0 && p==1 && m==0);
+    }
+    r.temperature_set=r.top_k_set=r.top_p_set=r.min_p_set=true;
+    r.temperature=0;r.top_k=7;r.top_p=.4f;r.min_p=.2f;
+    float t,p,m;int k;request_sampling_values(&r,&t,&k,&p,&m);
+    assert(t==0 && k==7 && p==.4f && m==.2f);request_free(&r);
+}
+static void test_muse_anthropic_schema(void) {
+    const char *schema="{\"name\":\"lookup\",\"input_schema\":{\"type\":\"object\",\"properties\":{\"key\":{\"type\":\"string\"}},\"required\":[\"key\"]}}";
+    buf recipients={0};char *prompt=muse_tools_prompt(schema,&recipients);
+    assert(strstr(prompt,"\"key\":{\"type\":\"string\"}") && strstr(prompt,"\"required\":[\"key\"]"));
+    free(prompt);buf_free(&recipients);
+}
+int main(int argc,char **argv) {assert(argc==2);ds4_engine *engine=ds4_test_muse_tokenizer_engine(argv[1]);test_muse_anthropic_schema();test_muse_sampling();test_muse_model_listing(engine);test_muse_hidden_reasoning_stream();test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();ds4_engine_close(engine);puts("Muse server prompt, model listing and ATEM roundtrip: PASS");}

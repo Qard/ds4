@@ -56,6 +56,21 @@ headers for reasoning and ATEM tool calls, including consecutive tool messages.
 The OpenAI, Anthropic, and Responses adapters separate reasoning from visible
 content. Text containing literal `<think>` tags stays ordinary content.
 
+The published template always leaves the assistant recipient header open. Muse
+has no native zero-reasoning setting: `none` uses its minimum strength (8) and
+suppresses private `self` messages in CLI, agent, evaluation and API output.
+This preserves the model's ability to select a tool recipient. Private tokens
+still consume context and count toward the generation budget. Enabled effort
+levels expose their private channel separately from user-visible text.
+
+Muse defaults to temperature 1, top-p 1, no top-k cutoff and min-p 0, matching
+[Meta's recommended sampling](https://dev.meta.ai/docs/muse-spark-open/settings).
+Explicit client sampling settings take precedence. High effort can require a
+large output budget; the live reasoning probe uses 2048 tokens and a fixed
+sampling seed. Greedy high-effort decoding exhausted the earlier 512-token
+probe while repeating private planning, so that run remains recorded as a
+failure rather than a passing reasoning check.
+
 This integration targets text inference on one Apple Silicon GPU. Unsupported
 backends, vision, speculative/MTP support models, distributed placement,
 steering, and power throttling are rejected before model allocation.
@@ -88,7 +103,7 @@ validation. Passing fixture tests does not establish useful token throughput.
 
 ```sh
 make test-muse-gguf test-muse-tokenizer
-make test-muse-chat test-muse-server test-muse-agent test-muse-eval test-muse-engine
+make test-muse-chat test-muse-cli test-muse-server test-muse-agent test-muse-eval test-muse-engine
 make test-muse-metal test-muse-attention test-muse-experts test-muse-quant
 make test-muse-graph test-muse-session test-muse-memory
 uv run --with huggingface-hub==2.2.0 --with 'numpy>=2,<3' \

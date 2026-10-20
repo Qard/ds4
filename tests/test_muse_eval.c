@@ -14,7 +14,7 @@ static void feed(ds4_engine *e,ds4_chat_decode_state *state,byte_buf *answer,eva
 }
 int main(int argc,char **argv) {
     assert(argc==2);ds4_engine *e=ds4_test_muse_tokenizer_engine(argv[1]);
-    ds4_chat_decode_state state;ds4_chat_decode_init(&state,DS4_THINK_HIGH);
+    ds4_chat_decode_state state;ds4_chat_decode_init(&state);
     byte_buf answer={0};eval_ui ui={0};
     feed(e,&state,&answer,&ui," to=self<|message|>Private\nAnswer: A");
     assert(!answer.len && state.reasoning);
@@ -31,7 +31,7 @@ int main(int argc,char **argv) {
     assert(close.len==expected.len && !memcmp(close.v,expected.v,(size_t)close.len*sizeof(int)));
     eval_config cfg={.think_mode=DS4_THINK_MAX};
     assert(eval_auto_context_size(e,&cfg,eval_core_cases,1,128,NULL,NULL)<(int)ds4_think_max_min_context());
-    buf_free(&answer);ds4_chat_decode_init(&state,DS4_THINK_HIGH);
+    buf_free(&answer);ds4_chat_decode_init(&state);
     feed(e,&state,&answer,&ui," to=self<|message|>Private plan");
     cfg.hard_limit_reply_budget=512;int position=-1,rank=0;eval_think_close_kind kind;
     for(int i=0;i<close.len;i++) {

@@ -1021,10 +1021,10 @@ static agent_config parse_options(int argc, char **argv) {
 static void agent_apply_model_sampling_defaults(
         ds4_engine               *engine,
         agent_generation_options *gen) {
-    if (!engine || !gen || !ds4_engine_is_glm_dsa(engine)) return;
+    if (!engine || !gen || (!ds4_engine_is_glm_dsa(engine) && !ds4_engine_is_muse(engine))) return;
 
     if (!gen->temperature_set) gen->temperature = 1.0f;
-    if (!gen->top_p_set) gen->top_p = 0.95f;
+    if (!gen->top_p_set) gen->top_p = ds4_engine_is_muse(engine) ? 1.0f : 0.95f;
     if (!gen->min_p_set) gen->min_p = 0.0f;
 }
 
@@ -10122,7 +10122,7 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
      * conversation.  If anything fails, invalidate live KV so the next turn
      * cannot accidentally continue from the private compaction exchange. */
     agent_buf summary = {0};
-    ds4_chat_decode_state summary_decode;ds4_chat_decode_init(&summary_decode, DS4_THINK_NONE);
+    ds4_chat_decode_state summary_decode;ds4_chat_decode_init(&summary_decode);
     char eval_err[160] = {0};
     int dsml_id = agent_special_token_id(w->engine, "｜DSML｜");
     double t0 = now_sec();
@@ -10167,7 +10167,7 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
             ds4_session_invalidate(w->session);ds4_tokens_free(&prompt);ds4_tokens_free(&sys);
             free(summary.ptr);agent_publish(w, "\x1b[0m\n", 5);return false;
         }
-        if (ds4_engine_is_muse(w->engine) && summary_decode.reasoning) text_len = 0;
+        if (ds4_engine_is_muse(w->engine) && !summary_decode.final_answer) text_len = 0;
         agent_buf_append(&summary, text, text_len);
         agent_publish(w, text, text_len);
         free(text);
@@ -10379,7 +10379,7 @@ static int worker_finish_generated_token(agent_worker *w,
     size_t text_len = 0;
     const bool muse = stream->syntax == AGENT_TOOL_SYNTAX_MUSE;
     if (muse && !stream->muse_decode_ready) {
-        ds4_chat_decode_init(&stream->muse_decode, effective_think_mode(w->cfg));
+        ds4_chat_decode_init(&stream->muse_decode);
         stream->muse_decode_ready = true;
     }
     char *text = muse ? ds4_chat_decode_token(w->engine, &stream->muse_decode, token, &text_len)
@@ -10388,7 +10388,12 @@ static int worker_finish_generated_token(agent_worker *w,
         snprintf(err, err_len, "malformed Muse recipient header");
         return 1;
     }
-    agent_trace_token(w, token, text, text_len, *generated + 1);
+    if(muse && w->trace) {
+        /* Trace the actual token, including recipient controls. Rendered body
+         * pieces cannot reconstruct a transcript or validate compaction. */
+        size_t raw_len=0;char *raw=ds4_token_text(w->engine,token,&raw_len);
+        agent_trace_token(w,token,raw,raw_len,*generated+1);free(raw);
+    } else agent_trace_token(w, token, text, text_len, *generated + 1);
     if (muse) {
         if (stream->in_think != stream->muse_decode.reasoning) {
             agent_stream_flush_start_tail(stream);
@@ -10401,7 +10406,8 @@ static int worker_finish_generated_token(agent_worker *w,
         if (stream->in_think) {
             /* Private Muse messages may contain tool plans or literal ATEM.
              * Only messages addressed outside self enter the tool parser. */
-            for (size_t i = 0; i < text_len; i++) renderer_write_char(stream->renderer, text[i]);
+            if(ds4_think_mode_enabled(effective_think_mode(w->cfg)))
+                for (size_t i = 0; i < text_len; i++) renderer_write_char(stream->renderer, text[i]);
         } else agent_stream_text(stream, text, text_len, false);
     } else agent_stream_text(stream, text, text_len, false);
     free(text);
@@ -10696,15 +10702,10 @@ static int worker_run_turn(agent_worker *w, const char *user_text) {
         if (tool_syntax == AGENT_TOOL_SYNTAX_MUSE) {
             /* Reconstruct the recipient state from the retained assistant
              * prefix, including resumption after context compaction. */
-            ds4_chat_decode_init(&stream.muse_decode, DS4_THINK_HIGH);
-            stream.muse_decode_ready = true;
-            for (int i = assistant_start; i < w->transcript.len; i++) {
-                size_t n = 0;
-                char *part = ds4_chat_decode_token(w->engine, &stream.muse_decode, w->transcript.v[i], &n);
-                if (!part) {agent_set_error(w, "malformed retained Muse recipient header");return 1;}
-                free(part);
+            if(ds4_chat_decode_prefix(w->engine,&stream.muse_decode,&w->transcript)) {
+                agent_set_error(w,"malformed retained Muse recipient header");return 1;
             }
-            stream.in_think = renderer.in_think = stream.muse_decode.reasoning;
+            stream.muse_decode_ready=true;
         }
         agent_edit_upto_forcer upto_forcer = {0};
         bool got_tool = false;

@@ -38,7 +38,6 @@ for mode,effort in ((1,'high'),(2,'xhigh'),(3,'low'),(4,'medium'),(0,'low')):
         messages=([{'role':'system','content':system}] if system else [])+[{'role':'user','content':prompt}]
         expected=template.render(messages=messages,reasoning_effort=effort,current_date=datetime.date.today().isoformat(),
                 bos_token='<|begin_of_text|>',add_generation_prompt=True)
-        if mode==0: expected+=' to=user<|message|>'
         p=subprocess.run([sys.argv[1],str(model),str(mode),system,prompt],capture_output=True,text=True,check=True)
         actual=json.loads(p.stdout.splitlines()[0])
         ids=full.encode(expected,add_special_tokens=False).ids

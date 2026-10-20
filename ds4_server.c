@@ -996,6 +996,28 @@ static void request_init(request *r, req_kind kind, int max_tokens) {
     r->think_mode = DS4_THINK_HIGH;
 }
 
+/* Resolve omitted sampling knobs once using the model's native defaults.
+ * Explicit client choices, including greedy decoding, always win. */
+static void request_sampling_values(const request *r, float *temperature,
+                                    int *top_k, float *top_p, float *min_p) {
+    *temperature = r->temperature;
+    *top_k = r->top_k;
+    *top_p = r->top_p;
+    *min_p = r->min_p;
+    if (ds4_think_mode_enabled(r->think_mode)) {
+        if (!r->temperature_set) *temperature = DS4_DEFAULT_TEMPERATURE;
+        if (!r->top_k_set) *top_k = 0;
+        if (!r->top_p_set) *top_p = DS4_DEFAULT_TOP_P;
+        if (!r->min_p_set) *min_p = DS4_DEFAULT_MIN_P;
+    }
+    if (r->model_syntax == SERVER_MODEL_SYNTAX_MUSE) {
+        if (!r->temperature_set) *temperature = 1.0f;
+        if (!r->top_k_set) *top_k = 0;
+        if (!r->top_p_set) *top_p = 1.0f;
+        if (!r->min_p_set) *min_p = 0.0f;
+    }
+}
+
 static bool parse_ignore_eos_value(const char **p, request *r) {
     return p && r && json_bool(p, &r->ignore_eos);
 }
@@ -12675,7 +12697,7 @@ static bool should_remember_thinking_checkpoint(const request *r,
     const bool qwen_chat = (r->model_syntax == SERVER_MODEL_SYNTAX_QWEN || r->model_syntax == SERVER_MODEL_SYNTAX_MUSE) &&
                            r->api != API_RESPONSES && r->api != API_ANTHROPIC;
     if ((r->has_tools || r->prompt_preserves_reasoning) && !qwen_chat) return false;
-    if (!ds4_think_mode_enabled(r->think_mode)) return false;
+    if (!ds4_think_mode_enabled(r->think_mode) && r->model_syntax!=SERVER_MODEL_SYNTAX_MUSE) return false;
     if (finish && (!strcmp(finish, "error") || !strcmp(finish, "length"))) return false;
     if (thinking && thinking->inside) return false;
     return true;
@@ -12838,7 +12860,7 @@ static char *build_tool_checkpoint_suffix(const request *r, const char *content,
                                           const char *reasoning, const tool_calls *calls) {
     const server_model_syntax syntax =
         r ? r->model_syntax : SERVER_MODEL_SYNTAX_DEEPSEEK;
-    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return build_muse_assistant_suffix(r,content,reasoning,true,calls);
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return build_muse_assistant_suffix(content,reasoning,true,calls);
     if (syntax == SERVER_MODEL_SYNTAX_QWEN) {
         return build_qwen_assistant_suffix(r, content, reasoning, true, calls);
     }
@@ -12862,7 +12884,7 @@ static char *build_responses_visible_assistant_suffix(const request *r,
                                                       const tool_calls *calls) {
     const server_model_syntax syntax =
         r ? r->model_syntax : SERVER_MODEL_SYNTAX_DEEPSEEK;
-    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return build_muse_assistant_suffix(r,content,reasoning,
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return build_muse_assistant_suffix(content,reasoning,
         r && r->reasoning_summary_emit && calls && calls->len>0,calls);
     if (syntax == SERVER_MODEL_SYNTAX_QWEN) {
         return build_qwen_assistant_suffix(r, content, reasoning,
@@ -12908,11 +12930,11 @@ static char *build_responses_visible_assistant_suffix(const request *r,
 static char *build_thinking_visible_text(const request *r,
                                          const char *content) {
     if (!r || !r->prompt_text) return NULL;
-    if (!ds4_think_mode_enabled(r->think_mode)) return NULL;
+    if (!ds4_think_mode_enabled(r->think_mode) && r->model_syntax!=SERVER_MODEL_SYNTAX_MUSE) return NULL;
 
     size_t pt_len = strlen(r->prompt_text);
     if(r->model_syntax==SERVER_MODEL_SYNTAX_MUSE) {
-        char *suffix=build_muse_assistant_suffix(r,content,NULL,false,NULL);buf visible={0};
+        char *suffix=build_muse_assistant_suffix(content,NULL,false,NULL);buf visible={0};
         buf_puts(&visible,r->prompt_text);
         /* The stop token has not entered KV: leave it in the next request's
          * suffix, so visible-prefix reuse evaluates the missing boundary. */
@@ -12986,7 +13008,7 @@ static char *build_qwen_tool_turn_visible_text(const request *r,
     if (r->kind != REQ_CHAT || r->image_count != 0) return NULL;
     if(r->model_syntax==SERVER_MODEL_SYNTAX_MUSE) {
         if(!r->prompt_text || !calls->raw_tool_text || inside_thinking || !finish || strcmp(finish,"stop")) return NULL;
-        char *suffix=build_muse_assistant_suffix(r,content,NULL,false,calls);size_t n=strlen(suffix),end=strlen("<|eot|>");
+        char *suffix=build_muse_assistant_suffix(content,NULL,false,calls);size_t n=strlen(suffix),end=strlen("<|eot|>");
         if(n>=end && !strcmp(suffix+n-end,"<|eot|>")) n-=end;
         buf visible={0};buf_puts(&visible,r->prompt_text);buf_append(&visible,suffix,n);free(suffix);return buf_take(&visible);
     }
@@ -13961,7 +13983,7 @@ decode_again:
     ;
     buf text = {0},muse_reasoning={0};size_t muse_reasoning_emitted=0;
     const bool muse_chat=j->req.kind==REQ_CHAT && j->req.model_syntax==SERVER_MODEL_SYNTAX_MUSE;
-    ds4_chat_decode_state muse_decode;ds4_chat_decode_init(&muse_decode,j->req.think_mode);
+    ds4_chat_decode_state muse_decode;ds4_chat_decode_init(&muse_decode);
     size_t plain_stream_pos = 0;
     size_t stop_scan_from = 0;
     const char *finish = "length";
@@ -14000,20 +14022,9 @@ decode_again:
         if (!(j->req.kind == REQ_CHAT && j->req.has_tools && (saw_tool_start || in_tool_call))) {
             if (!multimodal) kv_cache_maybe_store_continued(s, slot);
         }
-        float temperature = j->req.temperature;
-        int top_k = j->req.top_k;
-        float top_p = j->req.top_p;
-        float min_p = j->req.min_p;
-        if (ds4_think_mode_enabled(j->req.think_mode)) {
-            /* Thinking keeps the fixed DeepSeek-style sampling defaults, but
-             * only for knobs the client left out: an explicit request value
-             * (e.g. temperature 0 from a benchmark harness) must win, or the
-             * same greedy request returns different text on every call. */
-            if (!j->req.temperature_set) temperature = DS4_DEFAULT_TEMPERATURE;
-            if (!j->req.top_k_set) top_k = 0;
-            if (!j->req.top_p_set) top_p = DS4_DEFAULT_TOP_P;
-            if (!j->req.min_p_set) min_p = DS4_DEFAULT_MIN_P;
-        }
+        float temperature, top_p, min_p;
+        int top_k;
+        request_sampling_values(&j->req, &temperature, &top_k, &top_p, &min_p);
         const bool greedy_tool_syntax = !thinking.inside && in_tool_call &&
             !dsml_decode_state_uses_payload_sampling(dsml_state);
         const float payload_temperature = temperature;
@@ -14582,7 +14593,7 @@ decode_again:
             ds4_tokens_free(&effective_prompt);
             return;
         }
-        if(muse_chat && muse_reasoning.len) {free(parsed_reasoning);parsed_reasoning=xstrdup(muse_reasoning.ptr);}
+        if(muse_chat && muse_reasoning.len && ds4_think_mode_enabled(j->req.think_mode)) {free(parsed_reasoning);parsed_reasoning=xstrdup(muse_reasoning.ptr);}
         if (parsed_calls.len) {
             if (openai_live_chat) apply_openai_stream_tool_ids(&parsed_calls, &openai_live);
             if (j->req.api == API_ANTHROPIC && j->req.stream)
