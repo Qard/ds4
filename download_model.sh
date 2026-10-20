@@ -41,6 +41,12 @@ QWEN38_Q2_FILE="Qwen3.8-Flash-Next-Q2.gguf"
 QWEN38_VISION_FILE="mmproj-Qwen3.8-Flash-Next-Q8_0.gguf"
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+case "${1:-}" in
+    muse-oq3e)
+        shift
+        exec uv run --script "$ROOT/muse/download.py" "$@"
+        ;;
+esac
 OUT_DIR=${DS4_GGUF_DIR:-"$ROOT/gguf"}
 case "$OUT_DIR" in
     /*) ;;
@@ -53,6 +59,7 @@ usage() {
 DwarfStar GGUF downloader
 
 Usage:
+  ./download_model.sh muse-oq3e [--output DIR] [--dry-run]
   ./download_model.sh ds4f-q2 [--token TOKEN]
   ./download_model.sh ds4f-q2-q4 [--token TOKEN]
   ./download_model.sh ds4f-q4 [--token TOKEN]
@@ -84,6 +91,12 @@ Usage:
   ./download_model.sh qwen38-vision [--token TOKEN]
 
 Targets:
+
+  muse-oq3e
+       Experimental Muse Spark Open MLX oQ3e checkpoint, about 346 GiB.
+       Requires uv. Use --dry-run to inspect download size, --output to
+       choose a fast SSD. Resumes on rerun. Uses HF_TOKEN if set.
+       Run with ./ds4-muse; native ./ds4 does not yet support Muse.
 
   ds4f-q2
        2-bit routed experts, about 81 GB on disk.

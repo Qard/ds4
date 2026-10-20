@@ -27,6 +27,23 @@ All shards, the index, config, and tokenizer files must be present locally.
 Nothing is downloaded by the runner. Model weights remain subject to the
 Muse Model License.
 
+Download the audited revision with the existing download entry point. Install
+uv first, then choose a fast SSD with roughly 400 GiB free for a fresh download:
+
+```sh
+./download_model.sh muse-oq3e --output /Volumes/FastSSD/Muse --dry-run
+./download_model.sh muse-oq3e --output /Volumes/FastSSD/Muse
+./ds4-muse -m /Volumes/FastSSD/Muse --inspect
+./ds4-muse -m /Volumes/FastSSD/Muse --ctx 8192 --tokens 32 -p 'Hello'
+```
+
+Without `--output`, the downloader uses `models/Muse-Spark-Open-816B-A42B-oQ3e`
+inside the checkout. Rerun the same command to resume interrupted downloads;
+completed files are reused. It downloads all shards and supporting files directly
+into the destination through Hugging Face Hub's `local_dir` mechanism. `HF_TOKEN`
+is honored if authentication or higher download limits are needed. `--dry-run`
+requests metadata only and reports total size and files still needing download.
+
 Install [uv](https://docs.astral.sh/uv/) and run the executable from the checkout.
 Its inline dependencies and adjacent lockfile pin MLX-LM 0.32.2 and MLX 0.32.4.
 uv creates an isolated environment; the native build does not depend on MLX.
@@ -101,7 +118,8 @@ uv pip install --python .venv-muse/bin/python \
 .venv-muse/bin/python -m unittest discover -s tests -p 'test_muse_*.py' -v
 ```
 
-The 20 tests cover cross-shard slicing, truncated files, cache admission/eviction,
+The 22 tests cover downloader dry-run/argument routing, cross-shard slicing,
+truncated files, cache admission/eviction,
 failed reads, mixed 3/4/5-bit projections, single-expert cache prefill, reference
 logits through sliding-window rollover and decode, memory refusal, malformed
 checkpoints, checkpoint chat templates, and numeric CLI generation. Missing resident tensors cause an error
