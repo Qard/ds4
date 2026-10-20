@@ -32,6 +32,11 @@ int ds4_gpu_muse_logits_tensor(ds4_gpu_tensor *logits, uint32_t n, float scale, 
 
 /* Raw expert outputs [tokens][slots][latent]; Muse applies its input-scaled
  * per-expert norm before the existing weighted reduction. Gate/up share type. */
+/* Begin the existing bounded pread work after routing, before latent projection.
+ * Every begun load is joined before expert dispatch or graph failure returns. */
+int ds4_gpu_muse_prefetch_experts_tensor(const ds4_gpu_stream_expert_table *table,
+    const ds4_gpu_tensor *selected,uint32_t n_selected);
+int ds4_gpu_muse_prefetch_finish(void);
 int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     const ds4_gpu_tensor *x, const ds4_gpu_tensor *selected,
     const void *map, uint64_t size, uint64_t gate_offset, uint64_t up_offset,

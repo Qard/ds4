@@ -66,6 +66,11 @@ GiB of expert weights. A cached expert triplet occupies 12.375 MiB. Only the
 selected experts are read into explicit cache buffers; routed banks are never
 mapped as a cache-overflow fallback.
 
+Single-token decode starts selected-expert reads after routing and overlaps
+them with the independent latent projection, using ds4's existing pread pool.
+Pending reads are joined before expert dispatch and on graph failure. Prefill
+uses the bounded batch loader.
+
 Admission reserves fixed weights, per-session KV and scratch, a safety margin,
 and the expert cache. It also measures currently available host memory before
 pinning weights. Another application's GPU allocations therefore reduce the

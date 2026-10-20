@@ -17280,19 +17280,15 @@ static int ds4_gpu_glm_stream_selected_prefetch_take(
     return 1;
 }
 
-int ds4_gpu_glm_stream_expert_cache_begin_selected_load_tensor(
+static int ds4_gpu_stream_expert_cache_begin_selected_load_tensor_impl(
         const ds4_gpu_stream_expert_table *table,
         const ds4_gpu_tensor              *selected,
-        uint32_t                           n_selected) {
-    g_glm_stream_selected_prefetch.active = 0;
-    if (!g_ssd_streaming_mode ||
-        getenv("DS4_METAL_DISABLE_GLM_STREAMING_EXPERT_EARLY_LOAD") != NULL) {
-        return 1;
-    }
+        uint32_t                           n_selected,
+        int32_t                           *selected_out) {
     if (!table || !selected ||
         n_selected == 0 ||
         n_selected > DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED) {
-        return 1;
+        return 0;
     }
 
     const int timing = ds4_gpu_stream_expert_timing_summary_enabled();
@@ -17332,12 +17328,20 @@ int ds4_gpu_glm_stream_expert_cache_begin_selected_load_tensor(
                                                    selected_copy_ms,
                                                    selected_bind_ms);
     }
-    if (ok) {
-        ds4_gpu_glm_stream_selected_prefetch_set(table,
-                                                 selected_ids,
-                                                 n_selected);
-    }
+    if (ok && selected_out) memcpy(selected_out,selected_ids,(size_t)n_selected*sizeof(*selected_out));
     if (had_batch && ds4_gpu_begin_commands() == 0) ok = 0;
+    return ok;
+}
+
+int ds4_gpu_glm_stream_expert_cache_begin_selected_load_tensor(
+        const ds4_gpu_stream_expert_table *table,
+        const ds4_gpu_tensor *selected,uint32_t n_selected) {
+    g_glm_stream_selected_prefetch.active=0;
+    if(!g_ssd_streaming_mode || getenv("DS4_METAL_DISABLE_GLM_STREAMING_EXPERT_EARLY_LOAD") ||
+        !table || !selected || !n_selected || n_selected>DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED) return 1;
+    int32_t ids[DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED];
+    int ok=ds4_gpu_stream_expert_cache_begin_selected_load_tensor_impl(table,selected,n_selected,ids);
+    if(ok) ds4_gpu_glm_stream_selected_prefetch_set(table,ids,n_selected);
     return ok;
 }
 
@@ -50750,6 +50754,26 @@ int ds4_gpu_muse_logits_tensor(ds4_gpu_tensor *logits, uint32_t n, float scale, 
                          MTLSizeMake(((uint64_t)n+31)/32, 1, 1));
 }
 
+int ds4_gpu_muse_prefetch_experts_tensor(const ds4_gpu_stream_expert_table *table,
+    const ds4_gpu_tensor *selected,uint32_t n_selected) {
+    if(!g_ssd_streaming_mode || getenv("DS4_METAL_DISABLE_STREAMING_EXPERT_EARLY_LOAD")) return 1;
+    if(!table || !table->model_map || !selected || !n_selected ||
+        n_selected>DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED || n_selected>table->n_total_expert ||
+        table->n_total_expert>DS4_METAL_STREAM_EXPERT_CACHE_MAX_EXPERT ||
+        table->layer>=DS4_METAL_STREAM_EXPERT_CACHE_MAX_LAYER ||
+        !table->gate_expert_bytes || !table->down_expert_bytes ||
+        table->gate_offset>table->model_size || table->up_offset>table->model_size ||
+        table->down_offset>table->model_size ||
+        table->n_total_expert>(table->model_size-table->gate_offset)/table->gate_expert_bytes ||
+        table->n_total_expert>(table->model_size-table->up_offset)/table->gate_expert_bytes ||
+        table->n_total_expert>(table->model_size-table->down_offset)/table->down_expert_bytes) return 0;
+    return ds4_gpu_stream_expert_cache_begin_selected_load_tensor_impl(table,selected,n_selected,NULL);
+}
+
+int ds4_gpu_muse_prefetch_finish(void) {
+    return ds4_gpu_stream_expert_pending_load_finish(NULL);
+}
+
 int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     const ds4_gpu_tensor *x, const ds4_gpu_tensor *selected,
     const void *map, uint64_t size, uint64_t gate_offset, uint64_t up_offset,
@@ -50797,6 +50821,7 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
         bool ok = views[0] && views[1] && views[2] && views[3];
         bool had_batch = g_batch_cb != nil;
         if (ok && had_batch) ok = ds4_gpu_end_commands();
+        if (ok) ok=ds4_gpu_muse_prefetch_finish();
         id<MTLBuffer> ga=nil, ua=nil, da=nil, og=nil, ou=nil, od=nil;
         ds4_gpu_stream_expert_cache_entry *resources[DS4_METAL_STREAM_EXPERT_CACHE_MAX_EXPERT];
         uint32_t resource_count=0, unique=0;

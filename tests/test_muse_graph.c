@@ -24,15 +24,32 @@ int main(int argc, char **argv) {
     assert(muse_graph_alloc(&g,16,chunk));
     assert(muse_graph_alloc(&last_graph,16,chunk));
     FILE *out=fopen(argv[2],"wb"); assert(out);
-    int ids[]={1,2,3,4,5,6,7,8,9,10}; float logits[10*32];
+    int ids[]={1,2,3,4,5,6,7,8,9,10}; float logits[10*32],first_logits[32];
     for(unsigned first=0;first<10;) {
         unsigned n=MIN(chunk,10-first);
         assert(muse_graph_forward(&g,&m,&w,ids+first,n,logits,true));
+        if(!first) memcpy(first_logits,logits,sizeof(first_logits));
         float last[32];
         assert(muse_graph_forward(&last_graph,&m,&w,ids+first,n,last,false));
         assert(memcmp(last,logits+(n-1)*32,sizeof(last))==0);
         assert(fwrite(logits,32*4,n,out)==n);
         first+=n;
+    }
+    if(streamed) {
+        ds4_gpu_set_streaming_expert_cache_budget(2);
+        ds4_muse_gpu_graph failure;assert(muse_graph_alloc(&failure,16,1));
+        ds4_tensor invalid=*w.layer[0].ffn_pre_exp_norm;invalid.abs_offset=m.size;
+        ds4_weights broken=w;broken.layer[0].ffn_pre_exp_norm=&invalid;
+        assert(!muse_graph_forward(&failure,&m,&broken,ids,1,NULL,false));
+        assert(!failure.valid && !ds4_gpu_commands_active());
+        /* Failure happens after routing and prefetch but before experts run.
+         * Installed entries prove the pending reads were joined on return. */
+        assert(ds4_gpu_stream_expert_cache_current_count()==DS4_N_EXPERT_USED);
+        muse_graph_free(&failure);
+        assert(muse_graph_alloc(&failure,16,1));float recovered[32];
+        assert(muse_graph_forward(&failure,&m,&w,ids,1,recovered,false));
+        for(unsigned i=0;i<32;i++) assert(fabsf(recovered[i]-first_logits[i])<2e-5f);
+        muse_graph_free(&failure);
     }
     int invalid=32;
     assert(!muse_graph_forward(&g,&m,&w,&invalid,1,logits,true));

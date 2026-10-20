@@ -93,6 +93,16 @@ static bool muse_norm(ds4_gpu_tensor *out,const ds4_gpu_tensor *x,const ds4_mode
                                                width,rows,DS4_RMS_EPS);
 }
 
+static bool muse_prefetch_experts(const ds4_model *m,const ds4_layer_weights *l,
+        uint32_t layer,const ds4_gpu_tensor *selected,uint32_t tokens) {
+    /* Decode exposes one routing vector. Start its bounded disk reads before
+     * the independent latent projection; prefill retains the batch loader. */
+    if(tokens!=1) return true;
+    ds4_gpu_stream_expert_table table=graph_stream_expert_table_make(m,l,layer,
+        l->ffn_gate_exps->bytes/DS4_N_EXPERT,l->ffn_down_exps->bytes/DS4_N_EXPERT);
+    return ds4_gpu_muse_prefetch_experts_tensor(&table,selected,DS4_N_EXPERT_USED)!=0;
+}
+
 static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_model *m,const ds4_weights *w,
         const int *tokens,uint32_t T,float *out,bool all_rows) {
     if (g) g->cancelled=false;
@@ -128,6 +138,7 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
             muse_gemv(g->router,m,l->ffn_gate_inp,g->xn,T) &&
             ds4_gpu_glm_router_select_batch_tensor(g->selected,g->weights,g->probs,m->map,m->size,
                 l->ffn_exp_probs_b->abs_offset,g->router,DS4_N_EXPERT,DS4_N_EXPERT_USED,DS4_EXPERT_WEIGHT_SCALE,T) &&
+            muse_prefetch_experts(m,l,il,g->selected,T) &&
             muse_gemv(g->latent,m,l->ffn_latent_down,g->xn,T) &&
             muse_norm(g->latent,g->latent,m,l->ffn_pre_exp_norm,T,DS4_N_MOE_LATENT) &&
             ds4_gpu_muse_experts_tensor(g->mid,g->part,g->latent,g->selected,m->map,m->size,
@@ -156,7 +167,7 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
     ds4_gpu_tensor_free(last);
     if (ds4_gpu_commands_active()) ok=ds4_gpu_end_commands() && ok;
     if (ok && out) ok=ds4_gpu_tensor_read(g->logits,0,out,(uint64_t)rows*DS4_N_VOCAB*4);
-    if (!ok) { g->valid=false; return false; }
+    if (!ok) { (void)ds4_gpu_muse_prefetch_finish();g->valid=false;return false; }
     g->pos+=T;
     if (g->pos>g->kv_highwater) g->kv_highwater=g->pos;
     return true;

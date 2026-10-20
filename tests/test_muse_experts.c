@@ -52,10 +52,29 @@ int main(void) {
         ds4_gpu_set_streaming_expert_cache_budget(S);
         ds4_gpu_set_streaming_expert_cache_expert_bytes(D*F*4*3);
         assert(ds4_gpu_begin_commands());
+        if(streamed) {
+            const ds4_gpu_stream_expert_table table={.model_map=map,.model_size=SIZE,
+                .layer=0,.n_total_expert=E,.gate_offset=0,.up_offset=BANK,.down_offset=2*BANK,
+                .gate_expert_bytes=D*F*4,.down_expert_bytes=D*F*4};
+            ds4_gpu_stream_expert_table bad=table;bad.down_offset=SIZE;
+            assert(!ds4_gpu_muse_prefetch_experts_tensor(&bad,selected,S));
+            int32_t invalid[S]={-1,0};
+            assert(ds4_gpu_tensor_write(selected,0,invalid,sizeof(invalid)));
+            assert(!ds4_gpu_muse_prefetch_experts_tensor(&table,selected,S));
+            int32_t stale[S]={3,2};
+            assert(ds4_gpu_tensor_write(selected,0,stale,sizeof(stale)));
+            assert(ds4_gpu_muse_prefetch_experts_tensor(&table,selected,S));
+            assert(ds4_gpu_stream_expert_cache_current_count()<=S);
+            /* Abandon that selection and use a different one. The pending
+             * reads must be joined without substituting stale routing IDs. */
+            assert(ds4_gpu_tensor_write(selected,0,ids,sizeof(ids)));
+            assert(ds4_gpu_muse_input_norm_tensor(mid,x,map,SIZE,3*BANK,T,D,1e-8f));
+        }
         assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,T,E,S,D,F,0));
         assert(ds4_gpu_muse_input_norm_tensor(part,part,map,SIZE,3*BANK,T*S,D,1e-8f));
         assert(ds4_gpu_qwen4_moe_reduce_tensor(out,part,w,NULL,NULL,NULL,NULL,T,S,S,D,0));
         assert(ds4_gpu_end_commands());
+        assert(ds4_gpu_muse_prefetch_finish());
         float actual[T*D]; assert(ds4_gpu_tensor_read(out,0,actual,sizeof(actual)));
         for(unsigned i=0;i<T*D;i++) assert(fabs(actual[i]-expected[i])<3e-5);
         if(streamed) assert(ds4_gpu_stream_expert_cache_current_count()<=S);
