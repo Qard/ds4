@@ -9,8 +9,8 @@ adapters are implemented. Small independent fixtures exercise numerical
 correctness and the conversation protocol.
 
 **Real-checkpoint startup, short generation, full-vocabulary prefill consistency,
-KV round trips, live APIs and agent interruption/tool recovery pass. Long-context
-compaction, sustained memory and throughput validation are in progress. This branch is not yet production-ready.**
+KV round trips, live APIs, an 8K context sweep and agent interruption/tool recovery
+pass. Long-context compaction and final cross-chunk validation are in progress. This branch is not yet production-ready.**
 Builds and bounded fixture tests run independently of the downloaded checkpoint.
 
 ## Download
@@ -103,8 +103,9 @@ frontend chooses a larger context after tokenization, the first session can
 refit the cache before allocating its graph. Live sessions never resize that
 cache underneath another session.
 
-The current kernels and expert scheduling still need full-model performance
-validation. Passing fixture tests does not establish useful token throughput.
+A completed full-checkpoint context sweep is reported below. Final performance
+validation of the cache-aging update is still pending; fixture throughput alone
+does not establish full-model performance.
 
 ## Checkpoint-free verification
 
@@ -273,3 +274,30 @@ test binary. It saves residuals, normalized FFN inputs, router logits, selected
 experts, queries and FP16 keys. Adding the observer preserved all native final
 logits exactly. `muse_checkpoint_reference.py --trace-directory NEW_DIRECTORY`
 saves the corresponding independent values.
+
+
+## Sustained automatic-cache run
+
+A sequential teacher-forced benchmark completed the 1024, 2048, 4096 and 8192
+context frontiers in 1556 seconds with prefill chunks of 512. It used 5336 cached
+experts (64.49 GiB), with an 84.83 GiB allocation plan. Each frontier decoded 64
+tokens; reported prefill rates apply to the additional tokens at that frontier.
+
+| Context | Additional prefill tokens | Prefill tokens/s | Decode tokens/s |
+| --- | --- | --- | --- |
+| 1024 | 1024 | 8.45 | 5.29 |
+| 2048 | 1024 | 5.31 | 2.93 |
+| 4096 | 2048 | 5.16 | 3.35 |
+| 8192 | 4096 | 5.30 | 3.91 |
+
+All frontiers completed, including snapshots restored between frontiers and
+execution beyond the 2048-token sliding window. At the 1024 frontier, all 202,048
+logits matched exactly between prefill chunks 32, 512 and 2048. The 8192 frontier
+still requires its second-chunk comparison.
+
+The memory collector retained 35 samples over approximately 17 minutes of this
+run, with a sampled peak resident size of 84.42 GiB and no increase in the system
+Swapouts counter during that sampled interval. This does not mean the machine
+had no preexisting swap use or that the collector covered the entire process.
+The completed sweep preceded the frequency-cache aging fix; that policy update
+has bounded eviction tests, but its full-checkpoint rerun remains pending.
