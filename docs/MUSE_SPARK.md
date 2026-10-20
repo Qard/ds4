@@ -180,7 +180,16 @@ expert caches, prefill chunks 32/128, teacher-forced continuations, and full-log
 comparisons with `tests/muse_compare_frontiers.py`. API checks cover OpenAI,
 Anthropic and Responses text/streaming output, literal `<think>` text, reasoning
 channels, and named tool calls/results. The lookup tool returns a random token
-without executing code. A separate run after restarting the server requires a
+without executing code. A separate probe requests two calls before waiting,
+returns a different random token for each call ID, and checks their ordered final
+answer in JSON and SSE for all three APIs:
+
+```sh
+python3 tests/muse_live_tools.py --output /tmp/muse-multiple-tools --plan
+python3 tests/muse_live_tools.py --output /tmp/muse-multiple-tools
+```
+
+A separate run after restarting the server requires a
 cache hit on its first request, with separate traces retained across restart.
 Agent tests cover interruption, actual tools in an isolated test project,
 compaction, saved-session restoration, context exhaustion, and recovery. They
@@ -301,3 +310,18 @@ Swapouts counter during that sampled interval. This does not mean the machine
 had no preexisting swap use or that the collector covered the entire process.
 The completed sweep preceded the frequency-cache aging fix; that policy update
 has bounded eviction tests, but its full-checkpoint rerun remains pending.
+
+
+The recipient-separation build passed a fresh 27-request API run across all three
+formats, including literal ATEM documentation with tools enabled in both JSON
+and SSE. It returned no tool calls for those examples, suppressed private text
+at disabled effort, and returned `323` with a separate reasoning stream at high
+effort. A further 12 requests passed two same-turn calls followed by two distinct
+random results in JSON and SSE for every API. Both IDs, lookup keys, and the
+ordered final answer were checked. The reusable `muse_live_tools.py` parser also
+reconstructed exactly the calls saved by all three actual SSE runs.
+
+Grouped raw ATEM replay now consumes a complete block per group of invokes,
+using the same grammar as generation parsing. Regressions cover two invokes in
+one block, separate blocks, and closing-looking block text inside a parameter,
+without duplicating calls or splitting parameter content.
