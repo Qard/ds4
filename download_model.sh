@@ -42,6 +42,10 @@ QWEN38_VISION_FILE="mmproj-Qwen3.8-Flash-Next-Q8_0.gguf"
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 case "${1:-}" in
+    muse-gguf)
+        shift
+        exec uv run --script "$ROOT/muse/download_native.py" "$@"
+        ;;
     muse-oq3e)
         shift
         exec uv run --script "$ROOT/muse/download.py" "$@"
@@ -59,6 +63,7 @@ usage() {
 DwarfStar GGUF downloader
 
 Usage:
+  ./download_model.sh muse-gguf [--output FILE.gguf] [--dry-run]
   ./download_model.sh muse-oq3e [--output DIR] [--dry-run]
   ./download_model.sh ds4f-q2 [--token TOKEN]
   ./download_model.sh ds4f-q2-q4 [--token TOKEN]
@@ -91,6 +96,13 @@ Usage:
   ./download_model.sh qwen38-vision [--token TOKEN]
 
 Targets:
+
+  muse-gguf
+       Native Muse Spark Open IQ2_XXS GGUF. Downloads one shard at a time,
+       verifies its SHA-256, joins without requantization, and releases the
+       staged shard. The final file and progress journal are resumable.
+       Default: ~/.ds4/models/muse-spark-open-native.gguf. Requires uv.
+       Native ds4 inference support is under implementation.
 
   muse-oq3e
        Experimental Muse Spark Open MLX oQ3e checkpoint, about 346 GiB.
