@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["numpy>=2,<3"]
+# ///
 """Independent NumPy reference for the GGUF Muse graph, with F16 cached KV.
 
 The graph order follows llama.cpp's Muse model; deterministic nonuniform norm

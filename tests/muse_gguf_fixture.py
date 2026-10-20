@@ -1,3 +1,7 @@
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["numpy>=2,<3"]
+# ///
 """Sparse production-shape fixtures: header-only allocation, no inference."""
 import struct
 import sys

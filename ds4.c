@@ -43292,6 +43292,7 @@ struct ds4_vocab {
     int im_start_id;
     int im_end_id;
     int endoftext_id;
+    int muse_start_id, muse_message_id, muse_eom_id;
     str_i32_table token_to_id;
     str_i32_table merge_rank;
 };
@@ -44178,6 +44179,8 @@ static qwen4_char_info qwen4_char_at(const char *s, uint64_t len, uint64_t pos) 
     return c;
 }
 
+#include "ds4_muse_tokenizer.inc"
+
 /* Qwen3.8 pre-tokenization (tokenizer.ggml.pre = "qwen35"), the ordered
  * alternation
  *   (?i:'s|'t|'re|'ve|'m|'ll|'d) | [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+ | \p{N} |
@@ -44311,6 +44314,10 @@ static void bpe_tokenize_text_qwen35(const ds4_vocab *vocab, const char *text, t
  * token stream for code prompts and produces wrong long-context logits.
  */
 static void bpe_tokenize_text(const ds4_vocab *vocab, const char *text, token_vec *out) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+        bpe_tokenize_text_muse(vocab,text,out);
+        return;
+    }
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_GLM_DSA) {
         bpe_tokenize_text_glm4(vocab, text, out);
         return;
@@ -44441,6 +44448,27 @@ static void vocab_load(ds4_vocab *vocab, const ds4_model *model) {
     vocab->im_start_id = -1;
     vocab->im_end_id = -1;
     vocab->endoftext_id = -1;
+
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+        ds4_str pre={0};
+        if (!model_get_string(model,"tokenizer.ggml.pre",&pre) || !ds4_streq(pre,"gpt-4o") ||
+            (uint32_t)vocab->n_vocab!=DS4_N_VOCAB)
+            ds4_die("Muse requires its GPT-4o tokenizer and complete vocabulary");
+        vocab->bos_id=vocab_lookup(vocab,"<|begin_of_text|>");
+        vocab->eos_id=vocab_lookup(vocab,"<|eot|>");
+        vocab->endoftext_id=vocab_lookup(vocab,"<|end_of_text|>");
+        vocab->muse_start_id=vocab_lookup(vocab,"<|start|>");
+        vocab->muse_message_id=vocab_lookup(vocab,"<|message|>");
+        vocab->muse_eom_id=vocab_lookup(vocab,"<|eom|>");
+        vocab->system_id=vocab->user_id=vocab->assistant_id=-1;
+        vocab->observation_id=vocab->sop_id=-1;
+        vocab->think_start_id=vocab->think_end_id=-1;
+        vocab->tool_call_start_id=vocab->tool_call_end_id=-1;
+        vocab->tool_response_start_id=vocab->tool_response_end_id=-1;
+        vocab->arg_key_start_id=vocab->arg_key_end_id=-1;
+        vocab->arg_value_start_id=vocab->arg_value_end_id=vocab->dsml_id=-1;
+        return;
+    }
 
     if (ds4_model_is_qwen4()) {
         /* ChatML without BOS; <|endoftext|> is the document separator and a
@@ -44678,11 +44706,32 @@ void ds4_tokenize_text(ds4_engine *e, const char *text, ds4_tokens *out) {
     bpe_tokenize_text(&e->vocab, text ? text : "", out);
 }
 
+typedef struct { const char *text; int token; } ds4_special_token;
+
+static bool special_token_match(const ds4_special_token *specials,size_t count,
+        const char *p,int *token,size_t *len) {
+    for (size_t i = 0; i < count; i++) {
+        if (specials[i].token < 0) continue;
+        size_t n = strlen(specials[i].text);
+        if (!strncmp(p, specials[i].text, n)) {
+            *token = specials[i].token;
+            *len = n;
+            return true;
+        }
+    }
+    return false;
+}
+
 static bool special_token_at(const ds4_vocab *vocab, const char *p, int *token, size_t *len) {
-    struct special {
-        const char *text;
-        int token;
-    } specials[] = {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+        const ds4_special_token muse[] = {
+            {"<|begin_of_text|>",vocab->bos_id}, {"<|end_of_text|>",vocab->endoftext_id},
+            {"<|start|>",vocab->muse_start_id}, {"<|message|>",vocab->muse_message_id},
+            {"<|eom|>",vocab->muse_eom_id}, {"<|eot|>",vocab->eos_id},
+        };
+        return special_token_match(muse,sizeof(muse)/sizeof(muse[0]),p,token,len);
+    }
+    ds4_special_token specials[] = {
         {"<｜begin▁of▁sentence｜>", vocab->bos_id},
         {"<｜end▁of▁sentence｜>",   vocab->eos_id},
         {"[gMASK]",                vocab->bos_id},
@@ -44710,16 +44759,7 @@ static bool special_token_at(const ds4_vocab *vocab, const char *p, int *token, 
         {"<|endoftext|>",          vocab->endoftext_id},
     };
 
-    for (size_t i = 0; i < sizeof(specials) / sizeof(specials[0]); i++) {
-        if (specials[i].token < 0) continue;
-        size_t n = strlen(specials[i].text);
-        if (!strncmp(p, specials[i].text, n)) {
-            *token = specials[i].token;
-            *len = n;
-            return true;
-        }
-    }
-    return false;
+    return special_token_match(specials,sizeof(specials)/sizeof(specials[0]),p,token,len);
 }
 
 static void tokenize_span(const ds4_vocab *vocab, const char *p, size_t n, token_vec *out) {
