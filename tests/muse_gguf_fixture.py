@@ -31,9 +31,10 @@ def fixture(path, bad=None):
     kv += [('muse-spark.expert_weights_norm', 7, True)]
     pattern = [int(i % 4 != 1) for i in range(62)]
     if bad == 'pattern': pattern.pop()
+    if bad == 'pattern_value': pattern[0]=0
     # Arr is the common GGUF writer's typed-array representation.
     from qwen4_pack_to_qwen4exp import Arr
-    kv += [('muse-spark.attention.sliding_window_pattern', 9, Arr(4, pattern))]
+    kv += [('muse-spark.attention.sliding_window_pattern', 9, Arr(4 if bad == 'pattern_type' else 7, pattern))]
     tensors = [('token_embd.weight', 8, [8192, 202048]),
                ('output_norm.weight', 0, [8192]), ('output.weight', 8, [8192, 202048])]
     layer = [('attn_norm', 0, [8192]), ('attn_q', 14, [8192, 8192]),
@@ -73,7 +74,7 @@ def fixture(path, bad=None):
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / 'sparse.gguf'
-        for bad in (None, 'latent', 'pattern', 'norm', 'missing', 'pair'):
+        for bad in (None, 'latent', 'pattern', 'norm', 'missing', 'pair', 'pattern_value', 'pattern_type'):
             fixture(path, bad)
             result = subprocess.run([sys.argv[1], str(path)], capture_output=True, text=True)
             if (result.returncode == 0) != (bad is None):

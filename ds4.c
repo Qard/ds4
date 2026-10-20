@@ -7284,7 +7284,16 @@ static void config_validate_muse_model(const ds4_model *m) {
     config_expect_bool("muse-spark.expert_weights_norm",
                        required_bool(m, "muse-spark.expert_weights_norm"), true);
     for (unsigned i = 0; i < DS4_N_LAYER; i++) g_muse_swa[i] = (i % 4 != 1);
-    config_expect_u32_array(m, "muse-spark.attention.sliding_window_pattern", g_muse_swa, DS4_N_LAYER);
+    ds4_array_ref pattern;
+    const char *key_pattern="muse-spark.attention.sliding_window_pattern";
+    if (!model_get_array(m,key_pattern,&pattern) || pattern.type!=GGUF_VALUE_BOOL || pattern.len!=DS4_N_LAYER)
+        ds4_die("Muse attention sliding-window pattern must be a boolean array matching the layer count");
+    ds4_cursor cursor=cursor_at(m,pattern.data_pos);
+    for (unsigned il=0;il<DS4_N_LAYER;il++) {
+        uint8_t bit=0;
+        if (!cursor_read(&cursor,&bit,1)) ds4_die(cursor.error);
+        config_expect_u32(key_pattern,bit,g_muse_swa[il]);
+    }
 }
 
 static void config_validate_model(const ds4_model *m) {
