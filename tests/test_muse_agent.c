@@ -102,6 +102,16 @@ static void test_tail_boundary(agent_worker *w) {
     ds4_tokens_free(&w->transcript);ds4_tokens_free(&tokens);
 }
 
+static void test_compaction_progress(void) {
+    agent_status status={.state=AGENT_WORKER_COMPACTING,.ctx_used=7101,.ctx_size=8192,
+        .prefill_total=5000,.prefill_done=1024,.prefill_tps=8.0};
+    char text[512];build_status_text(&status,text,sizeof(text));
+    AGENT_TEST_ASSERT(strstr(text,"COMPACTING reading 1024/5000")!=NULL);
+    status.generated=12;status.gen_tps=3.0;
+    build_status_text(&status,text,sizeof(text));
+    AGENT_TEST_ASSERT(strstr(text,"COMPACTING summary 12 tokens")!=NULL);
+}
+
 static void test_resume_prefix(agent_worker *w) {
     const char *headers[] = {"<|start|>assistant to=self<|message|>",
         "<|start|>assistant to=commentary<|message|>",
@@ -150,6 +160,7 @@ int main(int argc, char **argv) {
     test_tool_results(&w);
     test_history(&w);
     test_tail_boundary(&w);
+    test_compaction_progress();
     test_resume_prefix(&w);
     free(w.out);
     ds4_engine_close(w.engine);pthread_mutex_destroy(&w.mu);

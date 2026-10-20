@@ -10060,13 +10060,17 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
         summary_images++;
     agent_trace(w, "compaction summary prefix=%d total=%d retained_unsummarized=%d",
                 summary_bottom, bottom, bottom - summary_bottom);
+    int old_pos = ds4_session_pos(w->session);
+    int common = ds4_session_common_prefix(w->session, &prompt);
+    int cached = common == old_pos && prompt.len >= old_pos ? common : 0;
 
     pthread_mutex_lock(&w->mu);
     w->status.state = AGENT_WORKER_COMPACTING;
+    w->progress_base = cached;
     w->progress_direct = false;
     w->progress_started_at = now_sec();
     w->status.prefill_done = 0;
-    w->status.prefill_total = 0;
+    w->status.prefill_total = prompt.len - cached;
     w->status.prefill_tps = 0.0;
     w->status.generated = 0;
     w->status.gen_tps = 0.0;
@@ -11755,8 +11759,13 @@ static void build_status_text(const agent_status *st, char *buf, size_t len) {
                  st->greedy_sampling ? " ❄️" : "", st->gen_tps, power);
         break;
     case AGENT_WORKER_COMPACTING:
-        snprintf(buf, len, "ctx %s/%s | COMPACTING summary %d tokens %.1f t/s%s",
-                 used, total_ctx, st->generated, st->gen_tps, power);
+        if (!st->generated && st->prefill_done < st->prefill_total)
+            snprintf(buf, len, "ctx %s/%s | COMPACTING reading %d/%d %.1f t/s%s",
+                     used, total_ctx, st->prefill_done, st->prefill_total,
+                     st->prefill_tps, power);
+        else
+            snprintf(buf, len, "ctx %s/%s | COMPACTING summary %d tokens %.1f t/s%s",
+                     used, total_ctx, st->generated, st->gen_tps, power);
         break;
     case AGENT_WORKER_DRAINING:
         snprintf(buf, len, "ctx %s/%s | stopping after distributed cluster drains%s",
