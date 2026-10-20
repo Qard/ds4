@@ -99,3 +99,41 @@ the full checkpoint. Protocol tests use a metadata-only byte vocabulary and the
 published chat template. Metal graph and session tests use small synthetic
 weights, independent NumPy reference logits, bounded expert-cache eviction,
 sliding-window rollover, rewinds, cancellation, and disk KV round trips.
+
+## Manual full-checkpoint validation
+
+Build the diagnostic without loading any checkpoint:
+
+```sh
+make tests/test_muse_native_live
+uv run --script tests/muse_native_validation.py \
+  --model "$HOME/.ds4/models/muse-spark-open-native.gguf" \
+  --output /tmp/muse-native-validation --plan
+```
+
+When enough unified memory is free, remove `--plan` to execute. The output
+folder must be new. Runs are sequential, use the native ds4 engine, and request
+512 cached experts (about 6.2 GiB), a 4096-token context, and two independently
+allocated sessions. Admission still checks currently available memory.
+
+The driver checks raw completion and chat with reasoning disabled and enabled.
+It saves every vocabulary logit before and after eight continuation tokens,
+checks exact snapshot logits, decodes the same tokens through original and
+restored sessions, and checks prefix rewind. The second run teacher-forces the
+first run's IDs so prefill chunks 1 and 32 can be compared at identical prefixes.
+Prompt IDs, continuation IDs, raw token text, JSON results, and process memory
+reports are retained. The fixed continuation length intentionally evaluates
+through any stop token; these are numerical checks rather than chat transcripts.
+
+The comparator rejects nonfinite/truncated artifacts, differing prefixes, and
+logit errors above 0.002. It reports all-vector maximum/RMS error, cosine
+similarity, argmax agreement, and the smallest top-two margin. The snapshot and
+paired-session checks use stricter tolerances in the native driver. Tiny Metal
+fixtures test the same validation code, and Python tests exercise the artifact
+comparator without opening a checkpoint.
+
+These comparisons establish consistency within ds4. They do not replace an
+independent full-checkpoint reference, coherent generation and live tool-cycle
+checks, or sustained memory and throughput measurements with the automatic
+cache budget. Paired-session validation timings include duplicate decoding,
+snapshots and rewind work; they are not single-session throughput benchmarks.

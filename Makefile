@@ -1347,7 +1347,7 @@ ds4_cpu_test_hooks.o ds4_cuda_test_hooks.o tests/test_session_state.o \
 tests/test_session_state_gpu.o: ds4_tool_text.h
 
 clean:
-	rm -f tests/test_muse_metal tests/test_muse_gguf tests/test_muse_attention tests/test_muse_experts tests/test_muse_graph tests/test_muse_tokenizer tests/test_muse_session tests/test_muse_memory tests/test_muse_chat tests/test_muse_decode tests/test_muse_server tests/test_muse_agent tests/test_muse_eval tests/test_muse_quant
+	rm -f tests/test_muse_native_live tests/test_muse_metal tests/test_muse_gguf tests/test_muse_attention tests/test_muse_experts tests/test_muse_graph tests/test_muse_tokenizer tests/test_muse_session tests/test_muse_memory tests/test_muse_chat tests/test_muse_decode tests/test_muse_server tests/test_muse_agent tests/test_muse_eval tests/test_muse_quant
 	rm -f tests/test_mmvq_cuda tests/test_mmvq_rocm
 	rm -f tests/test_qwen4_ngrams
 	rm -f tests/test_qwen4_ngram_state
@@ -1565,3 +1565,10 @@ tests/test_muse_quant: tests/test_muse_quant.o $(filter-out ds4.o,$(CORE_OBJS))
 .PHONY: test-muse-quant
 test-muse-quant: tests/test_muse_quant
 	./tests/test_muse_quant
+
+# Manual full-checkpoint diagnostic. Building it never opens a model.
+tests/test_muse_native_live.o: tests/test_muse_native_live.c tests/muse_native_check.h ds4.h ds4_gpu.h
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -c -o $@ $<
+tests/test_muse_native_live: tests/test_muse_native_live.o $(CORE_OBJS)
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $^ $(METAL_LDLIBS)
+tests/test_muse_session.o: tests/muse_native_check.h

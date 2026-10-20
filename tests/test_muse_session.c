@@ -1,5 +1,6 @@
 #include "../ds4.c"
 #include <assert.h>
+#include "muse_native_check.h"
 
 static void equal_logits(ds4_session *a,ds4_session *b) {
     assert(ds4_session_argmax(a)==ds4_session_argmax(b));
@@ -99,7 +100,7 @@ int main(int argc,char **argv) {
     g_muse_swa[0]=1;g_muse_swa[1]=0;
     ds4_engine e={0}; e.backend=DS4_BACKEND_METAL; e.metal_ready=true;
     e.power_percent=100; e.prefill_chunk=3; e.ssd_streaming=streamed; e.ssd_streaming_cache_experts=2;
-    e.vocab.eos_id=e.vocab.endoftext_id=-1;
+    e.vocab.n_vocab=32; e.vocab.eos_id=e.vocab.endoftext_id=-1;
     model_open(&e.model,argv[1],true,false);
     weights_bind(&e.weights,&e.model,false,0,UINT32_MAX,true,false);
     assert(ds4_gpu_init()); ds4_gpu_set_ssd_streaming(streamed);
@@ -153,6 +154,17 @@ int main(int argc,char **argv) {
     assert(ds4_session_pos(a)==7 && ds4_session_pos(b)==7);
     generation_roundtrip(&e,a,ids);
     ds4_session_free(a);ds4_session_free(b);
+    assert(e.muse_session_bytes==0);
+    muse_native_result result={0};
+    const int teacher[]={7,8,9};
+    FILE *vectors=tmpfile(),*chosen=tmpfile(); assert(vectors && chosen);
+    assert(muse_native_check(&e,16,&prompt,teacher,3,vectors,chosen,&result,err,sizeof(err))==0);
+    assert(result.vocab==32 && result.steps==3 && result.rewind_max_error<3e-5f);
+    assert(ftell(vectors)==4*32*(long)sizeof(float));
+    assert(ftell(chosen)==3*(long)sizeof(int32_t));
+    rewind(chosen); int32_t actual[3]; assert(fread(actual,sizeof(*actual),3,chosen)==3);
+    assert(!memcmp(actual,teacher,sizeof(actual))); fclose(vectors);fclose(chosen);
+    assert(muse_native_check(&e,7,&prompt,teacher,3,NULL,NULL,&result,err,sizeof(err))!=0);
     assert(e.muse_session_bytes==0);
     ds4_gpu_cleanup();model_close(&e.model);
     puts("Muse sessions: prefix reuse, rewrite, rewind, KV payload restore, cancellation, and batch isolation PASS");
