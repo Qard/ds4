@@ -745,7 +745,7 @@ test-qwen4-cuda: tests/test_qwen4_cuda
 	./tests/test_qwen4_cuda
 endif
 
-ds4.o: ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h ds4_gpu_copy.h ds4_gpu_tp.h ds4_deepseek41_gpu.h ds4_deepseek41_dspark.h ds4_linux_memory.h ds4_engram.h
+ds4.o: ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4_muse_chat.inc ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h ds4_gpu_copy.h ds4_gpu_tp.h ds4_deepseek41_gpu.h ds4_deepseek41_dspark.h ds4_linux_memory.h ds4_engram.h
 	$(CC) $(CFLAGS) -c -o $@ ds4.c
 
 ds4_image.o: ds4_image.c ds4_image.h third_party/iris/jpeg.h third_party/iris/png.h
@@ -811,7 +811,7 @@ rax.o: rax.c rax.h rax_malloc.h
 linenoise.o: linenoise.c linenoise.h
 	$(CC) $(CFLAGS) -c -o $@ linenoise.c
 
-ds4_cpu.o: ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h ds4_gpu_tp.h
+ds4_cpu.o: ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4_muse_chat.inc ds4.h ds4_ssd.h ds4_distributed.h ds4_gpu.h ds4_gpu_tp.h
 	$(CC) $(CFLAGS) -Wno-unused-function -DDS4_NO_GPU -c -o $@ ds4.c
 
 ds4_cli_cpu.o: ds4_cli.c ds4.h ds4_ssd.h ds4_distributed.h ds4_help.h ds4_prompt_prefix.h linenoise.h
@@ -1452,7 +1452,7 @@ tests/test_muse_experts: tests/test_muse_experts.c ds4_muse_gpu.h $(CORE_OBJS)
 test-muse-experts: tests/test_muse_experts
 	./tests/test_muse_experts
 
-tests/test_muse_graph.o: tests/test_muse_graph.c ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h
+tests/test_muse_graph.o: tests/test_muse_graph.c ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4_muse_chat.inc ds4.h
 	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -I. -c -o $@ $<
 
 tests/test_muse_graph: tests/test_muse_graph.o $(filter-out ds4.o,$(CORE_OBJS))
@@ -1462,7 +1462,7 @@ tests/test_muse_graph: tests/test_muse_graph.o $(filter-out ds4.o,$(CORE_OBJS))
 test-muse-graph: tests/test_muse_graph
 	uv run --script tests/muse_graph_reference.py ./tests/test_muse_graph
 
-tests/test_muse_tokenizer.o: tests/test_muse_tokenizer.c ds4.c ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4.h
+tests/test_muse_tokenizer.o: tests/test_muse_tokenizer.c ds4.c ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4_muse_chat.inc ds4.h
 	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
 
 tests/test_muse_tokenizer: tests/test_muse_tokenizer.o ds4_engram.c $(filter-out ds4_cpu.o,$(CPU_CORE_OBJS))
@@ -1491,3 +1491,61 @@ tests/test_muse_memory: tests/test_muse_memory.o $(filter-out ds4.o,$(CORE_OBJS)
 .PHONY: test-muse-memory
 test-muse-memory: tests/test_muse_memory
 	uv run --script tests/muse_memory_reference.py ./tests/test_muse_memory
+
+# Header-only protocol tests run without a downloaded checkpoint or GPU.
+tests/test_muse_chat.o: tests/test_muse_chat.c ds4.c ds4.h ds4_muse_chat.inc ds4_muse_tokenizer.inc ds4_muse_unicode.inc
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
+
+tests/test_muse_decode.o: tests/test_muse_decode.c ds4.c ds4.h ds4_muse_chat.inc ds4_muse_tokenizer.inc ds4_muse_unicode.inc
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
+
+tests/test_muse_chat: tests/test_muse_chat.o ds4_engram.o $(filter-out ds4_cpu.o,$(CPU_CORE_OBJS))
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_muse_decode: tests/test_muse_decode.o ds4_engram.o $(filter-out ds4_cpu.o,$(CPU_CORE_OBJS))
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+tests/test_muse_server.o: tests/test_muse_server.c ds4_server.c ds4.h ds4_muse_server_render.inc ds4_muse_server_parse.inc ds4_muse_server_stream.inc
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
+
+tests/test_muse_server: tests/test_muse_server.o ds4_help.o ds4_kvstore.o rax.o ds4_engram.o $(CPU_CORE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+.PHONY: test-muse-chat test-muse-server test-muse-engine
+test-muse-chat: tests/test_muse_chat tests/test_muse_decode
+	uv run --script tests/muse_chat_reference.py ./tests/test_muse_chat ./tests/test_muse_decode
+
+test-muse-server: tests/test_muse_server
+	./tests/test_muse_server
+
+test-muse-engine: ds4
+	uv run --script tests/muse_engine_reference.py ./ds4
+
+tests/muse_tokenizer_engine.o: tests/muse_tokenizer_engine.c ds4.c ds4.h $(wildcard ds4_muse_*.inc)
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
+
+tests/test_muse_agent.o: tests/test_muse_agent.c ds4_agent.c ds4.h
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -DDS4_NO_GPU -I. -c -o $@ $<
+
+tests/test_muse_agent: tests/test_muse_agent.o tests/muse_tokenizer_engine.o ds4_help.o ds4_prompt_prefix.o ds4_web.o ds4_kvstore.o linenoise.o ds4_engram.o $(filter-out ds4_cpu.o,$(CPU_CORE_OBJS))
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+.PHONY: test-muse-agent
+test-muse-agent: tests/test_muse_agent
+	uv run --script tests/muse_agent_reference.py ./tests/test_muse_agent
+
+# Included adapters must invalidate server builds and the server unit suite.
+ds4_server.o ds4_server_cpu.o ds4_test.o: ds4_muse_server_render.inc ds4_muse_server_parse.inc ds4_muse_server_stream.inc
+
+tests/test_muse_gguf.o tests/test_muse_graph.o tests/test_muse_tokenizer.o \
+tests/test_muse_session.o tests/test_muse_memory.o: ds4_muse_chat.inc
+
+tests/test_muse_quant.o: tests/test_muse_quant.c ds4.c ds4.h $(wildcard ds4_muse_*.inc)
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -Wno-unused-function -I. -c -o $@ $<
+
+tests/test_muse_quant: tests/test_muse_quant.o $(filter-out ds4.o,$(CORE_OBJS))
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $^ $(METAL_LDLIBS)
+
+.PHONY: test-muse-quant
+test-muse-quant: tests/test_muse_quant
+	./tests/test_muse_quant

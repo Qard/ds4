@@ -7,6 +7,9 @@ int main(int argc,char **argv) {
     model_open(&e.model,argv[1],true,false);config_validate_model(&e.model);
     weights_bind(&e.weights,&e.model,false,0,UINT32_MAX,true,false);
     const uint64_t gib=UINT64_C(1073741824);
+    ds4_context_memory estimate=ds4_context_memory_estimate_with_prefill_mode(DS4_BACKEND_METAL,32768,32,true);
+    assert(estimate.total_bytes==muse_graph_bytes(32768,32));
+    assert(estimate.raw_bytes+estimate.scratch_bytes==estimate.total_bytes && estimate.prefill_cap==32);
     uint64_t graph=muse_session_memory_bytes(32768,32),resident=0,expert=0;
     assert(weights_streaming_non_routed_bytes(&e.weights,&resident));
     assert(ds4_streaming_routed_expert_bytes(&e.weights,&expert));
@@ -26,6 +29,9 @@ int main(int argc,char **argv) {
     assert(muse_memory_admit_for_host(&e,graph,true,128*gib,96*gib));
     assert(muse_memory_admit_for_host(&e,6*graph,false,128*gib,96*gib));
     assert(!muse_memory_admit_for_host(&e,7*graph,false,128*gib,96*gib));
+    e.muse_memory_budget=8*gib;
+    assert(!muse_memory_admit_for_host(&e,graph,true,128*gib,96*gib));
+    e.muse_memory_budget=0;
     e.muse_reserved_graph_bytes=0;e.ssd_streaming=false;
     assert(!muse_memory_admit_for_host(&e,graph,false,128*gib,96*gib));
     printf("Muse 128 GiB budget: %.2f GiB resident, %.2f GiB per 32K session, %u initial cached experts: PASS\n",

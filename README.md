@@ -15,9 +15,9 @@ GGUF files the project produces, that are part of the project
 itself.
 
 This fork is adding [native Muse Spark Open support](docs/MUSE_SPARK.md)
-for 128 GB Apple Silicon Macs. The GGUF downloader is available; native
-whole-model inference is still under implementation. The earlier `ds4-muse`
-MLX runner remains temporarily as experimental reference tooling.
+for 128 GB Apple Silicon Macs. The GGUF downloader, native Metal graph,
+sessions, CLI, server, and agent adapters are integrated. Full-checkpoint
+correctness and performance validation are still pending; see the linked status.
 
 We test things in integration: model loading, prompt rendering,
 tool calls, KV state, the HTTP server, and the coding agent are built and tested together.

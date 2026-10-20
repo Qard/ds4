@@ -35,6 +35,7 @@
 #include <sys/stat.h>
 #if defined(__APPLE__)
 #include <dispatch/dispatch.h>
+#include <mach/mach.h>
 #include <sys/sysctl.h>
 #endif
 #include <stdarg.h>
@@ -2919,7 +2920,10 @@ static void model_open(ds4_model *m, const char *path, bool metal_mapping,
     model_unmap_engram(m);
     model_unmap_qwen_ngrams(m, path);
 
-    if (!metal_mapping && prefetch_cpu) model_prefetch_cpu_mapping(m);
+    ds4_str architecture = {0};
+    const bool muse = model_get_string(m, "general.architecture", &architecture) &&
+                      ds4_streq(architecture, "muse-spark");
+    if (!metal_mapping && prefetch_cpu && !muse) model_prefetch_cpu_mapping(m);
 }
 
 static void print_size(uint64_t bytes) {
@@ -40569,6 +40573,9 @@ static ds4_context_memory glm_graph_context_memory_estimate_for_compact_cap(
 #ifdef DS4_HAS_DEEPSEEK41_GPU
 static ds4_context_memory ds41_graph_memory(uint32_t ctx);
 #endif
+#ifdef DS4_HAS_MUSE_METAL
+static ds4_context_memory muse_graph_memory(uint32_t ctx, uint32_t prefill);
+#endif
 static uint32_t qwen4_prefill_chunk_tokens(uint32_t ctx) {
     const char *env = getenv("DS4_QWEN4_PREFILL_CHUNK");
     const unsigned long v = env && env[0] ? strtoul(env, NULL, 10) : 8192ul;
@@ -40583,6 +40590,10 @@ ds4_context_memory ds4_context_memory_estimate_with_prefill_mode(
         bool        ssd_streaming) {
     ds4_context_memory m = {0};
     uint32_t ctx = ctx_size > 0 ? (uint32_t)ctx_size : 1u;
+#ifdef DS4_HAS_MUSE_METAL
+    if (backend == DS4_BACKEND_METAL && DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK)
+        return muse_graph_memory(ctx, prefill_chunk);
+#endif
     if (ds4_backend_uses_graph(backend) && ds4_model_is_qwen4()) {
         /* per-token f16 K/V and raw indexer keys per attention layer, pooled
          * block keys, rope positions; transients scale with the prefill chunk */
@@ -43330,7 +43341,7 @@ typedef enum {
 struct ds4_engine {
     char *model_path;
     uint64_t ds41_session_bytes;
-    uint64_t muse_session_bytes,muse_reserved_graph_bytes;
+    uint64_t muse_session_bytes,muse_reserved_graph_bytes,muse_memory_budget;
     ds4_model model;
     ds4_model mtp_model;
     ds4_model vision_model;
@@ -44647,12 +44658,22 @@ static void qwen4_chat_system(const ds4_vocab *vocab, const char *system, ds4_th
     qwen4_chat_close(vocab, out);
 }
 
+#include "ds4_muse_chat.inc"
+
 static void encode_chat_prompt(
         const ds4_vocab *vocab,
         const char      *system,
         const char      *prompt,
         ds4_think_mode   think_mode,
         token_vec       *out) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+        chat_push_bos_sequence(vocab,out);
+        muse_chat_system(vocab,system,think_mode,out);
+        muse_chat_open(vocab,"user",out);muse_chat_content(vocab,prompt,out);
+        token_vec_push(out,vocab->eos_id);
+        muse_chat_assistant_prefix(vocab,think_mode,out);
+        return;
+    }
     if (ds4_model_is_qwen4()) {
         if (vocab->im_start_id < 0 || vocab->im_end_id < 0 ||
             vocab->think_start_id < 0 || vocab->think_end_id < 0) {
@@ -44806,11 +44827,19 @@ void ds4_encode_chat_prompt(
     encode_chat_prompt(&e->vocab, system, prompt ? prompt : "", think_mode, out);
 }
 
+void ds4_chat_append_system_prompt(ds4_engine *e,ds4_tokens *tokens,const char *system,ds4_think_mode mode) {
+    if(DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {muse_chat_system(&e->vocab,system,mode,tokens);return;}
+    ds4_chat_append_think_prefix(e,tokens,mode);
+    if(system && system[0]) ds4_chat_append_message(e,tokens,"system",system);
+}
+
 void ds4_chat_append_max_effort_prefix(ds4_engine *e, ds4_tokens *tokens) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {muse_chat_system(&e->vocab,NULL,DS4_THINK_MAX,tokens);return;}
     chat_push_think_prefix(&e->vocab, DS4_THINK_MAX, tokens);
 }
 
 void ds4_chat_append_think_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_mode mode) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {muse_chat_system(&e->vocab,NULL,mode,tokens);return;}
     chat_push_think_prefix(&e->vocab, mode, tokens);
 }
 
@@ -44862,6 +44891,15 @@ void ds4_chat_append_message(ds4_engine *e, ds4_tokens *tokens, const char *role
     if (!role) role = "user";
     if (!content) content = "";
 
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+        if(!strcmp(role,"tool") || !strcmp(role,"function")) {
+            ds4_chat_append_tool_result(e,tokens,NULL,content);return;
+        }
+        const char *header=!strcmp(role,"assistant")?"assistant to=user":
+            (!strcmp(role,"system") || !strcmp(role,"developer"))?role:"user";
+        muse_chat_open(vocab,header,tokens);muse_chat_content(vocab,content,tokens);
+        token_vec_push(tokens,vocab->eos_id);return;
+    }
     if (ds4_model_is_qwen4()) {
         if (!strcmp(role, "tool") || !strcmp(role, "function")) {
             qwen4_chat_open(vocab, "user", tokens);
@@ -44928,6 +44966,7 @@ void ds4_chat_append_message(ds4_engine *e, ds4_tokens *tokens, const char *role
 }
 
 void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_mode think_mode) {
+    if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {muse_chat_assistant_prefix(&e->vocab,think_mode,tokens);return;}
     if (ds4_model_is_qwen4()) {
         qwen4_chat_assistant_prefix(&e->vocab, think_mode, tokens);
         return;
@@ -45075,6 +45114,42 @@ bool ds4_token_is_thinking_control(ds4_engine *e, int token) {
             token == e->vocab.think_start_id) ||
            (e->vocab.think_end_id >= 0 &&
             token == e->vocab.think_end_id);
+}
+
+void ds4_chat_decode_init(ds4_chat_decode_state *state, ds4_think_mode mode) {
+    memset(state,0,sizeof(*state));
+    state->body=!ds4_think_mode_enabled(mode);
+}
+
+char *ds4_chat_decode_token(ds4_engine *e,ds4_chat_decode_state *state,int token,size_t *len) {
+    if(!ds4_engine_is_muse(e)) return ds4_token_text(e,token,len);
+    *len=0;
+    if(!state) return NULL;
+    const ds4_vocab *v=&e->vocab;
+    if(token==v->muse_start_id || token==v->muse_eom_id) {
+        state->body=state->reasoning=false;state->header_len=0;state->header[0]=0;
+        return ds4_strdup("");
+    }
+    if(token==v->muse_message_id) {
+        state->body=true;state->reasoning=false;
+        const char *p=state->header;
+        while((p=strstr(p,"to="))) {
+            if((p==state->header || isspace((unsigned char)p[-1])) &&
+                !strncmp(p+3,"self",4) && (!p[7] || isspace((unsigned char)p[7]))) {
+                state->reasoning=true;break;
+            }
+            p+=3;
+        }
+        return ds4_strdup("");
+    }
+    if(token==v->bos_id || ds4_token_is_stop(e,token)) return ds4_strdup("");
+    char *piece=ds4_token_text(e,token,len);
+    if(!state->body) {
+        if(*len>=sizeof(state->header)-state->header_len) {free(piece);*len=0;return NULL;}
+        memcpy(state->header+state->header_len,piece,*len);state->header_len+=*len;
+        state->header[state->header_len]=0;*len=0;piece[0]=0;
+    }
+    return piece;
 }
 
 bool ds4_token_is_stop_for_think_mode(
@@ -61242,6 +61317,7 @@ uint32_t ds4_think_max_min_context(void) {
 
 ds4_think_mode ds4_think_mode_for_context(ds4_think_mode mode, int ctx_size) {
     if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_DEEPSEEK41 &&
+        DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_MUSE_SPARK &&
         mode == DS4_THINK_MAX && (uint32_t)(ctx_size > 0 ? ctx_size : 0) < DS4_THINK_MAX_MIN_CONTEXT) {
         return DS4_THINK_HIGH;
     }
@@ -66332,18 +66408,19 @@ int ds4_engine_generate_argmax(
                     ds4_backend_name(e->backend));
             return 1;
         }
-        if (e->multi_tier || DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41) {
+        if (e->multi_tier || DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41 ||
+            DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
             ds4_session *s = NULL;
             char err[256] = {0};
             const double t_prefill0 = now_sec();
             if (ds4_session_create(&s, e, ctx_size) != 0) {
-                fprintf(stderr, "ds4: failed to create multi-tier graph session\n");
+                fprintf(stderr, "ds4: failed to create graph session\n");
                 return 1;
             }
             ds4_session_set_progress(s, progress, progress_ud);
             if (ds4_session_sync(s, prompt, err, sizeof(err)) != 0) {
                 ds4_session_set_progress(s, NULL, NULL);
-                fprintf(stderr, "ds4: multi-tier prefill failed: %s\n", err);
+                fprintf(stderr, "ds4: session prefill failed: %s\n", err);
                 ds4_session_free(s);
                 return 1;
             }
@@ -66357,7 +66434,7 @@ int ds4_engine_generate_argmax(
             int token = ds4_session_argmax(s);
             for (int i = 0; i < n_predict && ds4_session_pos(s) < ctx_size; i++) {
                 if (token < 0) {
-                    fprintf(stderr, "ds4: multi-tier argmax failed\n");
+                    fprintf(stderr, "ds4: session argmax failed\n");
                     rc = 1;
                     break;
                 }
@@ -66373,7 +66450,7 @@ int ds4_engine_generate_argmax(
                     token = -1;
                 }
                 if (token < 0) {
-                    fprintf(stderr, "ds4: multi-tier decode failed: %s\n", err);
+                    fprintf(stderr, "ds4: session decode failed: %s\n", err);
                     rc = 1;
                     break;
                 }
@@ -68105,8 +68182,8 @@ static int glm_metal_graph_test(ds4_engine *e, const ds4_tokens *prompt) {
 #endif
 
 static bool engine_legacy_graph_test_supported(ds4_engine *e) {
-    if (!ds4_engine_is_deepseek41(e)) return true;
-    fprintf(stderr, "ds4: legacy graph diagnostics do not implement DeepSeek V4.1; use session logits instead\n");
+    if (!ds4_engine_is_deepseek41(e) && DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_MUSE_SPARK) return true;
+    fprintf(stderr, "ds4: legacy graph diagnostics do not implement this model; use session logits instead\n");
     return false;
 }
 
@@ -72089,10 +72166,36 @@ static int ds4_engine_open_internal(ds4_engine **out,
     }
     config_validate_model(&e->model);
     if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK && !opt->inspect_only) {
-        fprintf(stderr, "ds4: native Muse graph integration is under implementation\n");
-        ds4_engine_close(e);
-        *out = NULL;
-        return 1;
+        const bool supported =
+#ifdef DS4_HAS_MUSE_METAL
+            e->backend == DS4_BACKEND_METAL &&
+#endif
+            opt->tp.role == DS4_TP_NONE && !opt->cuda_tensor_parallel &&
+            (!gpu_cfg || gpu_cfg->n_gpus <= 1) &&
+            opt->distributed.role == DS4_DISTRIBUTED_NONE && !load_slice &&
+            !opt->glm_mtp && !opt->dspark &&
+            (!opt->mtp_path || !opt->mtp_path[0]) &&
+            (!opt->vision_path || !opt->vision_path[0]) &&
+            (!opt->directional_steering_file || !opt->directional_steering_file[0]) &&
+            e->power_percent == 100 && opt->context_size <= 1048576 &&
+            opt->prefill_chunk <= 8192 && !opt->ssd_streaming_full_layers &&
+            !opt->first_token_test && !opt->metal_graph_test;
+#ifndef DS4_HAS_MUSE_METAL
+        const bool compiled = false;
+#else
+        const bool compiled = true;
+#endif
+        if (!compiled || !supported) {
+            fprintf(stderr, "ds4: Muse requires Metal, context <= 1048576 and prefill chunk <= 8192; "
+                            "CPU/CUDA, distributed execution, external MTP, vision, steering, power "
+                            "throttling, full-layer streaming and legacy diagnostics are unsupported\n");
+            ds4_engine_close(e);
+            *out = NULL;
+            return 1;
+        }
+        /* Muse exceeds this target's RAM. Use the native bounded cache from
+         * startup so neither warming nor model views fault all expert banks. */
+        e->ssd_streaming = true;
     }
     if (ds4_model_is_qwen4() && !opt->inspect_only) {
         const bool backend_ok =
@@ -72146,7 +72249,8 @@ static int ds4_engine_open_internal(ds4_engine **out,
             return 1;
         }
     }
-    if (engine_warm_full_model(opt) && DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_DEEPSEEK41)
+    if (engine_warm_full_model(opt) && DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_DEEPSEEK41 &&
+        DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_MUSE_SPARK)
         model_warm_weights(&e->model);
     if (opt->vision_path && opt->vision_path[0]) {
         if (!ds4_model_is_glm53() && !g_ds4_flash_vision_exp && !ds4_model_is_qwen4() &&
@@ -72507,7 +72611,8 @@ static int ds4_engine_open_internal(ds4_engine **out,
         *out = NULL;
         return 1;
     }
-    if (e->ssd_streaming && e->ssd_streaming_cache_bytes != 0) {
+    if (e->ssd_streaming && e->ssd_streaming_cache_bytes != 0 &&
+        DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_MUSE_SPARK) {
         const uint64_t requested_cache_bytes = e->ssd_streaming_cache_bytes;
         const uint64_t safe_cache_bytes =
             ds4_streaming_manual_cache_safe_bytes(e->backend,
@@ -72814,16 +72919,37 @@ static int ds4_engine_open_internal(ds4_engine **out,
                 e->dspark_confidence_threshold = 0.4f;
         }
 #endif
-        if (!ds4_engine_configure_streaming_auto_cache(e, opt->context_size)) {
+        if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_MUSE_SPARK &&
+            !ds4_engine_configure_streaming_auto_cache(e, opt->context_size)) {
             ds4_engine_close(e);
             *out = NULL;
             return 1;
         }
-        if (!ds4_engine_configure_streaming_cache_budget(e)) {
+        if (DS4_MODEL_FAMILY != DS4_MODEL_FAMILY_MUSE_SPARK &&
+            !ds4_engine_configure_streaming_cache_budget(e)) {
             ds4_engine_close(e);
             *out = NULL;
             return 1;
         }
+#ifdef DS4_HAS_MUSE_METAL
+        if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
+            const uint32_t ctx = MAX(opt->context_size > 0 ? opt->context_size : 4096,
+                                     e->placement_ctx_hint > 0 ? e->placement_ctx_hint : 0);
+            const uint32_t sessions = e->placement_session_count_hint > 0 ? e->placement_session_count_hint : 1;
+            const uint32_t cap = muse_session_prefill_cap(e, ctx);
+            e->muse_reserved_graph_bytes = ds4_mul_sat_u64(muse_session_memory_bytes(ctx, cap), sessions);
+            bool uniform = true;
+            for (unsigned il = 0; il < DS4_N_LAYER; il++)
+                uniform = uniform && weights_streaming_layer_experts_uniform(&e->weights, il);
+            if (!uniform || !muse_memory_admit(e, e->muse_reserved_graph_bytes, true)) {
+                if (!uniform) fprintf(stderr, "ds4: Muse streaming requires a uniform expert size class across layers\n");
+                ds4_engine_close(e); *out = NULL; return 1;
+            }
+            fprintf(stderr, "ds4: Muse bounded expert cache: %u experts / %.2f GiB; reserved sessions %.2f GiB\n",
+                    e->ssd_streaming_cache_experts, ds4_bytes_to_gib(e->ssd_streaming_cache_bytes),
+                    ds4_bytes_to_gib(e->muse_reserved_graph_bytes));
+        }
+#endif
 #ifdef DS4_HAS_DEEPSEEK41_GPU
         if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41) {
             const uint32_t ctx = opt->context_size > 0 ? (uint32_t)opt->context_size : 4096;
@@ -73004,7 +73130,8 @@ static int ds4_engine_open_internal(ds4_engine **out,
                                       weights_have_output_head(&e->weights)));
             ds4_model_map_span_vec spans;
             bool spans_ok = false;
-            if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41) {
+            if (DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_DEEPSEEK41 ||
+                DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK) {
                 spans_ok = weights_model_map_decode_static_spans(&e->weights, true, true, &spans);
             } else if (load_slice) {
                 if (e->ssd_streaming_static_decode_map) {
@@ -73372,6 +73499,7 @@ int ds4_engine_power(ds4_engine *e) {
 
 int ds4_engine_set_power(ds4_engine *e, int power_percent) {
     if (!e || power_percent < 1 || power_percent > 100) return 1;
+    if(ds4_engine_is_muse(e) && power_percent!=100) return 1;
     e->power_percent = power_percent;
     return 0;
 }
@@ -73441,6 +73569,10 @@ int ds4_engine_model_id(ds4_engine *e) {
 bool ds4_engine_is_glm53(ds4_engine *e) {
     (void)e;
     return ds4_model_is_glm53();
+}
+
+bool ds4_engine_is_muse(ds4_engine *e) {
+    return e && DS4_MODEL_FAMILY == DS4_MODEL_FAMILY_MUSE_SPARK;
 }
 
 bool ds4_engine_is_qwen4(ds4_engine *e) {
@@ -75059,6 +75191,10 @@ bool ds4_session_is_distributed(ds4_session *s) {
 
 int ds4_session_set_power(ds4_session *s, int power_percent) {
     if (!s || !s->engine || power_percent < 1 || power_percent > 100) return 1;
+    if(ds4_session_is_muse(s)) {
+        if(power_percent==100) return 0;
+        fprintf(stderr,"ds4: session power throttling is unsupported for Muse\n");return 1;
+    }
     if (ds4_engine_is_deepseek41(s->engine)) {
         if (power_percent == 100) return 0;
         fprintf(stderr, "ds4: session power throttling is not supported for DeepSeek V4.1\n");
@@ -75090,6 +75226,7 @@ float ds4_session_directional_steering_ffn(ds4_session *s) {
 }
 
 int ds4_session_set_directional_steering_ffn(ds4_session *s, float scale) {
+    if(ds4_session_is_muse(s)) return scale==0.0f?0:1;
     if (!s || !s->engine || !isfinite(scale) ||
         scale < -100.0f || scale > 100.0f) {
         return 1;

@@ -37,6 +37,18 @@ static DS4_MAYBE_UNUSED uint64_t muse_graph_bytes(uint32_t context,uint32_t cap)
     return bytes;
 }
 
+static ds4_context_memory muse_graph_memory(uint32_t ctx, uint32_t prefill) {
+    ds4_context_memory m = {0};
+    uint32_t cap = MIN(ctx, prefill ? prefill : 32u);
+    m.prefill_cap = cap;
+    m.raw_cap = ctx;
+    for (unsigned il = 0; il < DS4_N_LAYER; il++)
+        m.raw_bytes += (uint64_t)muse_graph_cache_cap(il, ctx, cap) * DS4_N_HEAD_KV * DS4_N_HEAD_DIM * 4;
+    m.total_bytes = muse_graph_bytes(ctx, cap);
+    m.scratch_bytes = m.total_bytes - m.raw_bytes;
+    return m;
+}
+
 static void muse_graph_free(ds4_muse_gpu_graph *g) {
 #define MUSE_FREE(field,count) ds4_gpu_tensor_free(g->field);
     MUSE_GRAPH_SCRATCH(MUSE_FREE)

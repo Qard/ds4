@@ -359,6 +359,8 @@ static void cli_prefill_progress_cb(void *ud, const char *event, int current, in
 
 static bool is_rendered_chat_prompt(const char *prompt) {
     static const char *prefixes[] = {
+        "<|begin_of_text|>",
+        "<|start|>",
         "<｜begin▁of▁sentence｜>",
         "<｜User｜>",
         "[gMASK]",
@@ -384,6 +386,8 @@ typedef struct {
     bool color_open;
     bool use_color;
     bool last_output_newline;
+    bool muse_decode_ready, raw_output, decode_failed;
+    ds4_chat_decode_state decode;
     char pending[16];
     size_t pending_len;
 } token_printer;
@@ -494,6 +498,18 @@ static void token_printer_write_text(token_printer *p, const char *text, size_t 
 static void print_generated_token(void *ud, int token) {
     token_printer *p = ud;
     size_t len = 0;
+    if(ds4_engine_is_muse(p->engine) && !p->raw_output) {
+        if(!p->muse_decode_ready) {ds4_chat_decode_init(&p->decode,p->format_thinking?DS4_THINK_HIGH:DS4_THINK_NONE);p->muse_decode_ready=true;}
+        char *body=ds4_chat_decode_token(p->engine,&p->decode,token,&len);
+        if(!body) {p->decode_failed=true;fprintf(stderr,"ds4: malformed Muse recipient header\n");return;}
+        p->in_think=p->decode.reasoning;
+        if(len) {
+            if(p->use_color && p->in_think && !p->color_open) {fputs("\x1b[90m",p->fp);p->color_open=true;}
+            if(p->use_color && !p->in_think && p->color_open) {fputs("\x1b[0m",p->fp);p->color_open=false;}
+            fwrite(body,1,len,p->fp);p->last_output_newline=body[len-1]=='\n';
+        }
+        free(body);fflush(p->fp);return;
+    }
     char *text = ds4_token_text(p->engine, token, &len);
     token_printer_write_text(p, text, len);
     fflush(p->fp);
@@ -504,10 +520,8 @@ static void build_chat_prompt(ds4_engine *engine,
                               const cli_generation_options *gen,
                               ds4_tokens *out) {
     const ds4_think_mode think_mode = cli_effective_think_mode(gen);
-    ds4_chat_begin(engine, out);
-    ds4_chat_append_think_prefix(engine, out, think_mode);
-    if (gen->system && gen->system[0])
-        ds4_chat_append_message(engine, out, "system", gen->system);
+    ds4_chat_begin(engine,out);
+    ds4_chat_append_system_prompt(engine, out, gen->system, think_mode);
     ds4_prompt_prefix_append(engine, out, &gen->prefix);
     ds4_chat_append_message(engine, out, "user", gen->prompt ? gen->prompt : "");
     ds4_chat_append_assistant_prefix(engine, out, think_mode);
@@ -559,6 +573,7 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
         .in_think = ds4_think_mode_enabled(think_mode),
         .use_color = isatty(fileno(stdout)) != 0,
         .last_output_newline = true,
+        .raw_output = cfg->gen.raw_prompt,
     };
     cli_prefill_progress progress = {
         .base_tokens = 0,
@@ -631,11 +646,8 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
                 return 1;
             }
         } else {
-            size_t piece_len = 0;
-            char *piece = ds4_token_text(engine, token, &piece_len);
-            token_printer_write_text(&printer, piece, piece_len);
-            fflush(stdout);
-            free(piece);
+            print_generated_token(&printer,token);
+            if(printer.decode_failed) break;
             generated++;
             if (generated >= max_tokens || cli_interrupt_requested()) {
                 continue;
@@ -658,11 +670,8 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
                 stop = true;
                 break;
             }
-            size_t piece_len = 0;
-            char *piece = ds4_token_text(engine, toks[j], &piece_len);
-            token_printer_write_text(&printer, piece, piece_len);
-            fflush(stdout);
-            free(piece);
+            print_generated_token(&printer,toks[j]);
+            if(printer.decode_failed) {stop=true;break;}
             generated++;
             if (generated >= max_tokens) break;
         }
@@ -681,7 +690,7 @@ static int run_sampled_generation(ds4_engine *engine, const cli_config *cfg, con
             decode_s > 0.0 ? (double)generated / decode_s : 0.0);
 
     ds4_session_free(session);
-    return 0;
+    return printer.decode_failed?1:0;
 }
 
 static bool json_utf8_valid(const char *s, size_t n) {
@@ -1237,7 +1246,7 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
                     ds4_backend_name(cfg->engine.backend));
         }
     } else {
-        if (cfg->engine.distributed.role == DS4_DISTRIBUTED_COORDINATOR ||
+        if (ds4_engine_is_muse(engine) || cfg->engine.distributed.role == DS4_DISTRIBUTED_COORDINATOR ||
             cfg->engine.tp.role == DS4_TP_LEADER ||
             getenv("DS4_CLI_FORCE_SESSION") != NULL ||
             cfg->gen.temperature > 0.0f ||
@@ -1255,6 +1264,7 @@ static int run_generation(ds4_engine *engine, const cli_config *cfg) {
                 .in_think = ds4_think_mode_enabled(cli_effective_think_mode(&cfg->gen)),
                 .use_color = isatty(fileno(stdout)) != 0,
                 .last_output_newline = true,
+                .raw_output = cfg->gen.raw_prompt,
             };
             cli_prefill_progress progress = {
                 .base_tokens = 0,
@@ -1332,7 +1342,7 @@ typedef struct {
     int ctx_size;
     int think_prefix_pos;
     int think_prefix_tokens;
-    bool initial_system_text;
+    const char *initial_system;
 } repl_chat;
 
 static void repl_chat_free(repl_chat *chat);
@@ -1385,12 +1395,6 @@ static void tokens_remove(ds4_tokens *dst, int pos, int n) {
     dst->len -= n;
 }
 
-static void repl_chat_build_think_prefix(ds4_engine *engine,
-                                         ds4_think_mode mode,
-                                         ds4_tokens *prefix) {
-    ds4_chat_append_think_prefix(engine, prefix, mode);
-}
-
 /* Insert/replace the model-family thinking prefix inside the existing
  * transcript.  It lives immediately after the BOS sequence and before any
  * user/system text, matching the GGUF chat templates. */
@@ -1398,9 +1402,7 @@ static bool repl_chat_apply_think_prefix(ds4_engine *engine,
                                          repl_chat *chat,
                                          ds4_think_mode mode) {
     ds4_tokens prefix = {0};
-    repl_chat_build_think_prefix(engine, mode, &prefix);
-    if (ds4_engine_is_deepseek41(engine) && chat->initial_system_text && !prefix.len)
-        ds4_chat_append_message(engine, &prefix, "system", "");
+    ds4_chat_append_system_prompt(engine,&prefix,chat->initial_system,mode);
 
     bool same = chat->think_prefix_tokens == prefix.len;
     if (same && prefix.len > 0) {
@@ -1444,13 +1446,10 @@ static int repl_chat_create_session(ds4_engine *engine, repl_chat *chat, int ctx
 
 static int repl_chat_init(ds4_engine *engine, repl_chat *chat, const cli_config *cfg) {
     memset(chat, 0, sizeof(*chat));
-    chat->initial_system_text = cfg->gen.system && cfg->gen.system[0];
+    chat->initial_system = cfg->gen.system;
     ds4_chat_begin(engine, &chat->transcript);
     chat->think_prefix_pos = chat->transcript.len;
     repl_chat_apply_think_prefix(engine, chat, cli_effective_think_mode(&cfg->gen));
-    if (cfg->gen.system && cfg->gen.system[0]) {
-        ds4_chat_append_message(engine, &chat->transcript, "system", cfg->gen.system);
-    }
     ds4_prompt_prefix_append(engine, &chat->transcript, &cfg->gen.prefix);
     if (repl_chat_create_session(engine, chat, cfg->gen.ctx_size) != 0) {
         ds4_tokens_free(&chat->transcript);
@@ -1585,6 +1584,7 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat,
         .in_think = ds4_think_mode_enabled(think_mode),
         .use_color = isatty(fileno(stdout)) != 0,
         .last_output_newline = true,
+        .raw_output = cfg->gen.raw_prompt,
     };
 
     int max_tokens = cfg->gen.n_predict;
@@ -1636,12 +1636,9 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat,
                 return 1;
             }
         } else {
-            size_t piece_len = 0;
-            char *piece = ds4_token_text(engine, token, &piece_len);
-            ds4_tokens_push(&chat->transcript, token);
-            token_printer_write_text(&printer, piece, piece_len);
-            fflush(stdout);
-            free(piece);
+            ds4_tokens_push(&chat->transcript,token);
+            print_generated_token(&printer,token);
+            if(printer.decode_failed) break;
             generated++;
 
             cli_dist_busy_set(cfg, true);
@@ -1662,12 +1659,9 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat,
                 stop = true;
                 break;
             }
-            size_t piece_len = 0;
-            char *piece = ds4_token_text(engine, toks[j], &piece_len);
-            ds4_tokens_push(&chat->transcript, toks[j]);
-            token_printer_write_text(&printer, piece, piece_len);
-            fflush(stdout);
-            free(piece);
+            ds4_tokens_push(&chat->transcript,toks[j]);
+            print_generated_token(&printer,toks[j]);
+            if(printer.decode_failed) {stop=true;break;}
             generated++;
             if (generated >= max_tokens) break;
         }
@@ -1677,6 +1671,10 @@ static int run_chat_turn(ds4_engine *engine, cli_config *cfg, repl_chat *chat,
     generation_done(&printer);
 
     const bool interrupted = cli_interrupt_requested();
+    if(printer.decode_failed) {
+        chat->transcript.len=rollback_len;repl_chat_trim_images(chat,rollback_images);
+        ds4_session_invalidate(chat->session);return 1;
+    }
     if (interrupted && generated == 0) {
         chat->transcript.len = rollback_len;
         repl_chat_trim_images(chat, rollback_images);

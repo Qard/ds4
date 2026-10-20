@@ -56,6 +56,15 @@ static void payload_roundtrips(ds4_engine *e,ds4_session *a,ds4_session *b,int *
     equal_logits(a,b);fclose(fp);
     ds4_session_snapshot_free(&snap);ds4_session_snapshot_free(&small);
 }
+static void collect(void *ud,int token) {token_vec_push(ud,token);}
+static void generation_roundtrip(ds4_engine *e,ds4_session *s,int *ids) {
+    char err[256]={0};ds4_tokens prompt={.v=ids,.len=6,.cap=8};
+    rebuild(s,ids,6);int expected[3];
+    for(int i=0;i<3;i++) {expected[i]=ds4_session_argmax(s);assert(ds4_session_eval(s,expected[i],err,sizeof(err))==0);}
+    token_vec got={0};
+    assert(ds4_engine_generate_argmax(e,&prompt,3,16,collect,NULL,&got,NULL,NULL)==0);
+    assert(got.len==3 && memcmp(got.v,expected,sizeof(expected))==0);token_vec_free(&got);
+}
 static bool cancel_layer(void *ud) { return ++*(int *)ud >= 4; }
 static bool cancel(void *ud) {return *(bool *)ud;}
 static void progress(void *ud,const char *event,int pos,int total) {
@@ -70,7 +79,7 @@ int main(int argc,char **argv) {
     g_ds4_shape.n_moe_latent=128; g_ds4_shape.n_swa=4;
     g_muse_swa[0]=1;g_muse_swa[1]=0;
     ds4_engine e={0}; e.backend=DS4_BACKEND_METAL; e.metal_ready=true;
-    e.prefill_chunk=3; e.ssd_streaming=streamed; e.ssd_streaming_cache_experts=2;
+    e.power_percent=100; e.prefill_chunk=3; e.ssd_streaming=streamed; e.ssd_streaming_cache_experts=2;
     e.vocab.eos_id=e.vocab.endoftext_id=-1;
     model_open(&e.model,argv[1],true,false);
     weights_bind(&e.weights,&e.model,false,0,UINT32_MAX,true,false);
@@ -79,6 +88,9 @@ int main(int argc,char **argv) {
     assert(ds4_gpu_set_model_map(e.model.map,e.model.size) && ds4_gpu_set_model_fd(e.model.fd));
     ds4_session *a=NULL,*b=NULL;
     assert(ds4_session_create(&a,&e,16)==0 && ds4_session_create(&b,&e,16)==0);
+    assert(ds4_session_set_power(a,50)!=0 && ds4_engine_set_power(&e,50)!=0);
+    assert(ds4_session_power(a)==100 && ds4_session_set_power(a,100)==0);
+    assert(ds4_session_set_directional_steering_ffn(a,1)!=0);
     int ids[]={1,2,3,4,5,6,7,8}; char err[256]={0};
     ds4_tokens prompt={.v=ids,.len=6,.cap=8};
     assert(ds4_session_sync(a,&prompt,err,sizeof(err))==0);
@@ -119,6 +131,7 @@ int main(int argc,char **argv) {
     ds4_decode_item batch[2]={{.session=a,.token=15},{.session=b,.token=16}};
     assert(ds4_sessions_eval_batch(batch,2,err,sizeof(err))==0);
     assert(ds4_session_pos(a)==7 && ds4_session_pos(b)==7);
+    generation_roundtrip(&e,a,ids);
     ds4_session_free(a);ds4_session_free(b);
     assert(e.muse_session_bytes==0);
     ds4_gpu_cleanup();model_close(&e.model);

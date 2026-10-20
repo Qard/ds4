@@ -673,6 +673,7 @@ typedef enum {
     SERVER_MODEL_SYNTAX_GLM,
     SERVER_MODEL_SYNTAX_DEEPSEEK41,
     SERVER_MODEL_SYNTAX_QWEN,
+    SERVER_MODEL_SYNTAX_MUSE,
 } server_model_syntax;
 
 #define DS41_TOOL_CALLS_START "<｜DSML｜ calls>"
@@ -1213,6 +1214,7 @@ static bool model_alias_enables_thinking(const char *model) {
 }
 
 static server_model_syntax server_model_syntax_for_engine(ds4_engine *engine) {
+    if (ds4_engine_is_muse(engine)) return SERVER_MODEL_SYNTAX_MUSE;
     if (ds4_engine_is_qwen4(engine)) return SERVER_MODEL_SYNTAX_QWEN;
     return ds4_engine_is_glm_dsa(engine) ?
            SERVER_MODEL_SYNTAX_GLM : ds4_engine_is_deepseek41(engine) ?
@@ -1221,6 +1223,7 @@ static server_model_syntax server_model_syntax_for_engine(ds4_engine *engine) {
 
 static const char *server_model_id_from_engine(ds4_engine *engine) {
     if (ds4_engine_is_deepseek41(engine)) return "deepseek-v4.1-flash";
+    if (ds4_engine_is_muse(engine)) return "muse-spark-open";
     if (ds4_engine_is_qwen4(engine)) return "qwen3.8-flash-next";
     if (ds4_engine_is_glm53(engine)) return "glm-5.3-flash";
     if (ds4_engine_is_glm_dsa(engine)) return "glm-5.2";
@@ -3052,10 +3055,13 @@ static void append_qwen_tool_calls_text(buf *b, const tool_calls *calls, bool ha
     }
 }
 
+static void append_muse_tool_calls(buf *out,const tool_calls *calls);
+
 static void append_tool_calls_text_for_syntax(buf *b,
                                               server_model_syntax syntax,
                                               const tool_calls *calls,
                                               const tool_schema_orders *tool_orders) {
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) {append_muse_tool_calls(b,calls);return;}
     if (syntax == SERVER_MODEL_SYNTAX_GLM) {
         append_glm_tool_calls_text(b, calls, tool_orders);
     } else if (syntax == SERVER_MODEL_SYNTAX_QWEN) {
@@ -3613,11 +3619,14 @@ static char *render_qwen_chat_prompt_text(const chat_msgs *msgs,
     return buf_take(&out);
 }
 
+#include "ds4_muse_server_render.inc"
+
 static char *render_chat_prompt_text_for_syntax(server_model_syntax syntax,
                                                 const chat_msgs *msgs,
                                                 const char *tool_schemas,
                                                 const tool_schema_orders *tool_orders,
                                                 ds4_think_mode think_mode) {
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return render_muse_chat(msgs,0,tool_schemas,think_mode,false);
     if (syntax == SERVER_MODEL_SYNTAX_GLM) {
         return render_glm_chat_prompt_text(msgs, tool_schemas,
                                            tool_orders, think_mode);
@@ -3844,6 +3853,7 @@ static char *render_live_tool_tail_for_syntax(server_model_syntax syntax,
                                               const chat_msgs *msgs, int start,
                                               const tool_schema_orders *tool_orders,
                                               ds4_think_mode think_mode) {
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return render_muse_chat(msgs,start,NULL,think_mode,true);
     if (syntax == SERVER_MODEL_SYNTAX_GLM) {
         return render_glm_live_tool_tail(msgs, start, tool_orders, think_mode);
     }
@@ -5846,6 +5856,7 @@ static const char *find_any_tool_start(const char *s) {
         strstr(s, DS4_TOOL_CALLS_START_SHORT),
         strstr(s, "<tool_calls>"),
         strstr(s, "<tool_call>"),
+        strstr(s, "<atem:function_calls>"),
     };
     for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
         if (candidates[i] && (!best || candidates[i] < best)) best = candidates[i];
@@ -5861,6 +5872,7 @@ static const char *find_any_tool_end(const char *s) {
         strstr(s, DS4_TOOL_CALLS_END_SHORT),
         strstr(s, "</tool_calls>"),
         strstr(s, "</tool_call>"),
+        strstr(s, "</atem:function_calls>"),
     };
     for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
         if (candidates[i] && (!best || candidates[i] < best)) best = candidates[i];
@@ -6670,12 +6682,15 @@ static bool parse_qwen_generated_message_ex(const char *text,
     return true;
 }
 
+#include "ds4_muse_server_parse.inc"
+
 static bool parse_generated_message_ex_for_syntax(server_model_syntax syntax,
                                                   const char *text,
                                                   bool require_thinking_closed,
                                                   char **content_out,
                                                   char **reasoning_out,
                                                   tool_calls *calls) {
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return parse_muse_generated_message(text?text:"",content_out,reasoning_out,calls,NULL);
     if (syntax == SERVER_MODEL_SYNTAX_GLM) {
         return parse_glm_generated_message_ex(text, require_thinking_closed,
                                               content_out, reasoning_out,
@@ -6798,7 +6813,9 @@ static bool parse_generated_message_for_response_for_syntax(server_model_syntax 
                                                             const tool_schema_orders *orders) {
     if (recovered_out) *recovered_out = false;
 
-    bool parsed_ok = syntax == SERVER_MODEL_SYNTAX_QWEN ?
+    bool parsed_ok = syntax == SERVER_MODEL_SYNTAX_MUSE ?
+        parse_muse_generated_message(text?text:"",content_out,reasoning_out,calls,orders) :
+        syntax == SERVER_MODEL_SYNTAX_QWEN ?
         parse_qwen_generated_message_ex(text, require_thinking_closed,
                                          content_out, reasoning_out, calls, orders) :
         parse_generated_message_ex_for_syntax(syntax,
@@ -7191,13 +7208,13 @@ typedef struct {
 
 static bool stream_needs_second_reasoning_guard(const request *r) {
     return ds4_think_mode_enabled(r->think_mode) && r->has_tools &&
-           r->model_syntax != SERVER_MODEL_SYNTAX_QWEN;
+           r->model_syntax != SERVER_MODEL_SYNTAX_QWEN && r->model_syntax != SERVER_MODEL_SYNTAX_MUSE;
 }
 
 static void openai_stream_start(const request *r, openai_stream *st) {
     memset(st, 0, sizeof(*st));
     st->active = true;
-    st->mode = ds4_think_mode_enabled(r->think_mode) ? OPENAI_STREAM_THINKING : OPENAI_STREAM_TEXT;
+    st->mode = r->model_syntax != SERVER_MODEL_SYNTAX_MUSE && ds4_think_mode_enabled(r->think_mode) ? OPENAI_STREAM_THINKING : OPENAI_STREAM_TEXT;
     st->guard_second_reasoning = stream_needs_second_reasoning_guard(r);
 }
 
@@ -7381,6 +7398,11 @@ static const dsml_syntax dsml_syntaxes[] = {
         "<invoke", "</invoke>",
         "<parameter", "</parameter>",
     },
+};
+
+static const dsml_syntax muse_tool_syntax = {
+    "<atem:function_calls>", "</atem:function_calls>",
+    "<atem:invoke", "</atem:invoke>", "<atem:parameter", "</atem:parameter>",
 };
 
 static const dsml_syntax glm_tool_syntax = {
@@ -7601,9 +7623,9 @@ static void dsml_decode_tracker_update(dsml_decode_tracker *dt,
             const dsml_syntax *syn = NULL;
             bool found;
             if (dt->model_syntax == SERVER_MODEL_SYNTAX_GLM ||
-                dt->model_syntax == SERVER_MODEL_SYNTAX_QWEN) {
-                syn = dt->model_syntax == SERVER_MODEL_SYNTAX_QWEN ?
-                    &qwen_tool_syntax : &glm_tool_syntax;
+                dt->model_syntax == SERVER_MODEL_SYNTAX_QWEN || dt->model_syntax == SERVER_MODEL_SYNTAX_MUSE) {
+                syn = dt->model_syntax == SERVER_MODEL_SYNTAX_MUSE ? &muse_tool_syntax :
+                    dt->model_syntax == SERVER_MODEL_SYNTAX_QWEN ? &qwen_tool_syntax : &glm_tool_syntax;
                 const char *start = find_lit_bounded(raw + dt->pos,
                     raw_len - dt->pos, syn->tool_calls_start);
                 found = start != NULL;
@@ -7716,7 +7738,7 @@ structural:
                 }
                 size_t tag_after = (size_t)(tag_end - raw) + 1;
                 bool string_value = dt->model_syntax == SERVER_MODEL_SYNTAX_GLM ||
-                    dt->model_syntax == SERVER_MODEL_SYNTAX_QWEN ||
+                    dt->model_syntax == SERVER_MODEL_SYNTAX_QWEN || dt->model_syntax == SERVER_MODEL_SYNTAX_MUSE ||
                     dsml_attr_is_string_true(raw, raw_len, tag_start, tag_after);
                 dt->pos = tag_after;
                 if (string_value) {
@@ -8227,7 +8249,7 @@ typedef struct {
 
 static void responses_stream_init(const request *r, responses_stream *st) {
     memset(st, 0, sizeof(*st));
-    st->mode = ds4_think_mode_enabled(r->think_mode) ? RESP_STREAM_THINKING : RESP_STREAM_TEXT;
+    st->mode = r->model_syntax != SERVER_MODEL_SYNTAX_MUSE && ds4_think_mode_enabled(r->think_mode) ? RESP_STREAM_THINKING : RESP_STREAM_TEXT;
     responses_random_id(st->response_id, sizeof(st->response_id), "resp_");
     responses_random_id(st->reasoning_id, sizeof(st->reasoning_id), "rs_");
     responses_random_id(st->message_id, sizeof(st->message_id), "msg_");
@@ -9205,7 +9227,7 @@ static bool anthropic_sse_start_live(int fd, const request *r, const char *id,
 
     memset(st, 0, sizeof(*st));
     st->active = ok;
-    st->mode = ds4_think_mode_enabled(r->think_mode) ? ANTH_STREAM_THINKING : ANTH_STREAM_TEXT;
+    st->mode = r->model_syntax != SERVER_MODEL_SYNTAX_MUSE && ds4_think_mode_enabled(r->think_mode) ? ANTH_STREAM_THINKING : ANTH_STREAM_TEXT;
     st->guard_second_reasoning = stream_needs_second_reasoning_guard(r);
     return ok;
 }
@@ -9848,6 +9870,8 @@ static bool anthropic_sse_finish_live(int fd, server *s, const request *r, const
     if (!anthropic_sse_tool_blocks_live(fd, r, id, st, calls)) return false;
     return anthropic_sse_stop_live(fd, finish, completion_tokens);
 }
+
+#include "ds4_muse_server_stream.inc"
 
 static double now_sec(void) {
     struct timespec ts;
@@ -10917,6 +10941,7 @@ static const char *find_next_dsml_tool_block(const char *p, const char **end_out
         {DS4_TOOL_CALLS_START_SHORT, DS4_TOOL_CALLS_END_SHORT},
         {"\n\n<tool_calls>", "</tool_calls>"},
         {"<tool_calls>", "</tool_calls>"},
+        {"<atem:function_calls>", "</atem:function_calls>"},
     };
 
     const char *best = NULL;
@@ -12346,6 +12371,14 @@ static char *build_invalid_qwen_tool_error_suffix(const request *r,
 static char *build_invalid_tool_call_error_suffix(const request *r,
                                                   const thinking_state *thinking,
                                                   const char *detail) {
+    if(r && r->model_syntax==SERVER_MODEL_SYNTAX_MUSE) {
+        buf suffix={0},error={0};buf_puts(&error,"Tool error: invalid ATEM function call");
+        if(detail && detail[0]) {buf_puts(&error,": ");buf_puts(&error,detail);}
+        buf_puts(&error,". The previous output was not executed. Emit a valid <atem:function_calls> block, or answer normally.");
+        buf_puts(&suffix,"<|eot|>");muse_message_open(&suffix,"user");append_muse_text(&suffix,error.ptr);buf_puts(&suffix,"<|eot|>");
+        buf_puts(&suffix,ds4_think_mode_enabled(r->think_mode)?"<|start|>assistant":"<|start|>assistant to=user<|message|>");
+        buf_free(&error);return buf_take(&suffix);
+    }
     if (r && r->model_syntax == SERVER_MODEL_SYNTAX_GLM) {
         return build_invalid_glm_tool_error_suffix(r, thinking, detail);
     }
@@ -12635,7 +12668,7 @@ static bool should_remember_thinking_checkpoint(const request *r,
     /* Qwen Chat Completions clients may omit reasoning even with tools.
      * Remember an alternative visible key without changing exact replay.
      * Actual tool calls have their own checkpoint path at the call site. */
-    const bool qwen_chat = r->model_syntax == SERVER_MODEL_SYNTAX_QWEN &&
+    const bool qwen_chat = (r->model_syntax == SERVER_MODEL_SYNTAX_QWEN || r->model_syntax == SERVER_MODEL_SYNTAX_MUSE) &&
                            r->api != API_RESPONSES && r->api != API_ANTHROPIC;
     if ((r->has_tools || r->prompt_preserves_reasoning) && !qwen_chat) return false;
     if (!ds4_think_mode_enabled(r->think_mode)) return false;
@@ -12801,6 +12834,7 @@ static char *build_tool_checkpoint_suffix(const request *r, const char *content,
                                           const char *reasoning, const tool_calls *calls) {
     const server_model_syntax syntax =
         r ? r->model_syntax : SERVER_MODEL_SYNTAX_DEEPSEEK;
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return build_muse_assistant_suffix(r,content,reasoning,true,calls);
     if (syntax == SERVER_MODEL_SYNTAX_QWEN) {
         return build_qwen_assistant_suffix(r, content, reasoning, true, calls);
     }
@@ -12824,6 +12858,8 @@ static char *build_responses_visible_assistant_suffix(const request *r,
                                                       const tool_calls *calls) {
     const server_model_syntax syntax =
         r ? r->model_syntax : SERVER_MODEL_SYNTAX_DEEPSEEK;
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return build_muse_assistant_suffix(r,content,reasoning,
+        r && r->reasoning_summary_emit && calls && calls->len>0,calls);
     if (syntax == SERVER_MODEL_SYNTAX_QWEN) {
         return build_qwen_assistant_suffix(r, content, reasoning,
                                            r && r->reasoning_summary_emit && calls && calls->len > 0, calls);
@@ -12871,6 +12907,15 @@ static char *build_thinking_visible_text(const request *r,
     if (!ds4_think_mode_enabled(r->think_mode)) return NULL;
 
     size_t pt_len = strlen(r->prompt_text);
+    if(r->model_syntax==SERVER_MODEL_SYNTAX_MUSE) {
+        char *suffix=build_muse_assistant_suffix(r,content,NULL,false,NULL);buf visible={0};
+        buf_puts(&visible,r->prompt_text);
+        /* The stop token has not entered KV: leave it in the next request's
+         * suffix, so visible-prefix reuse evaluates the missing boundary. */
+        size_t n=strlen(suffix),end=strlen("<|eot|>");
+        if(n>=end && !strcmp(suffix+n-end,"<|eot|>")) n-=end;
+        buf_append(&visible,suffix,n);free(suffix);return buf_take(&visible);
+    }
     if (r->model_syntax == SERVER_MODEL_SYNTAX_QWEN) {
         /* the next request renders this turn as an empty think block plus the
          * trimmed content, closed by <|im_end|> */
@@ -12935,6 +12980,12 @@ static char *build_qwen_tool_turn_visible_text(const request *r,
                                                const tool_calls *calls) {
     if (!r || !calls || calls->len == 0) return NULL;
     if (r->kind != REQ_CHAT || r->image_count != 0) return NULL;
+    if(r->model_syntax==SERVER_MODEL_SYNTAX_MUSE) {
+        if(!r->prompt_text || !calls->raw_tool_text || inside_thinking || !finish || strcmp(finish,"stop")) return NULL;
+        char *suffix=build_muse_assistant_suffix(r,content,NULL,false,calls);size_t n=strlen(suffix),end=strlen("<|eot|>");
+        if(n>=end && !strcmp(suffix+n-end,"<|eot|>")) n-=end;
+        buf visible={0};buf_puts(&visible,r->prompt_text);buf_append(&visible,suffix,n);free(suffix);return buf_take(&visible);
+    }
     if (r->api == API_RESPONSES || r->api == API_ANTHROPIC) return NULL;
     if (r->model_syntax != SERVER_MODEL_SYNTAX_QWEN) return NULL;
     if (!r->prompt_text || !r->prompt_text[0]) return NULL;
@@ -13904,7 +13955,9 @@ static void generate_job_inner(server *s, server_slot *slot, job *j) {
     if (!rng) rng = UINT64_C(0x9e3779b97f4a7c15);
 decode_again:
     ;
-    buf text = {0};
+    buf text = {0},muse_reasoning={0};size_t muse_reasoning_emitted=0;
+    const bool muse_chat=j->req.kind==REQ_CHAT && j->req.model_syntax==SERVER_MODEL_SYNTAX_MUSE;
+    ds4_chat_decode_state muse_decode;ds4_chat_decode_init(&muse_decode,j->req.think_mode);
     size_t plain_stream_pos = 0;
     size_t stop_scan_from = 0;
     const char *finish = "length";
@@ -13926,7 +13979,7 @@ decode_again:
     double last_decode_log_t = decode_t0;
     int last_decode_log_completion = 0;
     thinking_state thinking = thinking_state_from_prompt(&j->req);
-    const bool thinking_gates_tool_markers = ds4_think_mode_enabled(j->req.think_mode);
+    const bool thinking_gates_tool_markers = !muse_chat && ds4_think_mode_enabled(j->req.think_mode);
     bool tool_scan_waiting_for_think_close =
         thinking_gates_tool_markers && thinking.inside;
     size_t think_recovery_scan_from = 0;
@@ -14050,14 +14103,23 @@ decode_again:
             }
 
             size_t piece_len = 0;
-            char *piece = ds4_token_text(s->engine, token, &piece_len);
+            char *piece = muse_chat ? ds4_chat_decode_token(s->engine,&muse_decode,token,&piece_len) :
+                                      ds4_token_text(s->engine, token, &piece_len);
+            if(!piece) {finish="error";snprintf(err,sizeof(err),"malformed Muse recipient header");stop_decode=true;break;}
             completion++;
             kept++;
 
             trace_piece(s, trace_id, piece, piece_len);
-            buf_append(&text, piece, piece_len);
+            if(muse_chat && muse_decode.reasoning) buf_append(&muse_reasoning,piece,piece_len);
+            else buf_append(&text, piece, piece_len);
             const bool was_thinking = thinking.inside;
-            if (!dsml_decode_state_is_tool(dsml_tracker.decode))
+            if(muse_chat) {
+                thinking.inside=muse_decode.reasoning;
+                if(j->req.stream && !muse_sse_reasoning_update(j->fd,&j->req,id,&openai_live,&anthropic_live,&responses_live,
+                        &muse_reasoning,&muse_reasoning_emitted,muse_decode.reasoning)) {
+                    job_mark_cancelled(j);finish="error";snprintf(err,sizeof(err),"client stream write failed");free(piece);stop_decode=true;break;
+                }
+            } else if (!dsml_decode_state_is_tool(dsml_tracker.decode))
                 thinking_state_feed(&thinking, piece, piece_len);
             if (j->req.kind == REQ_CHAT && j->req.has_tools) {
                 if (thinking.inside) {
@@ -14066,8 +14128,8 @@ decode_again:
                     dsml_tracker.pos = text.len;
                 } else {
                     if (was_thinking) {
-                        const char *end = find_last_substr(text.ptr, "</think>");
-                        dsml_tracker.pos = end ? (size_t)(end + 8 - text.ptr) : text.len;
+                        const char *end = !muse_chat && text.ptr ? find_last_substr(text.ptr, "</think>") : NULL;
+                        dsml_tracker.pos = muse_chat ? dsml_tracker.pos : end ? (size_t)(end + 8 - text.ptr) : text.len;
                     }
                     dsml_decode_tracker_update(&dsml_tracker, text.ptr, text.len);
                 }
@@ -14233,7 +14295,7 @@ decode_again:
                 break;
             }
 
-            if (j->req.kind == REQ_CHAT && j->req.has_tools && saw_tool_end) {
+            if (!muse_chat && j->req.kind == REQ_CHAT && j->req.has_tools && saw_tool_end) {
                 finish = "tool_calls";
                 stop_decode = true;
                 break;
@@ -14274,7 +14336,7 @@ decode_again:
         anthropic_stream_free(&anthropic_live);
         openai_stream_free(&openai_live);
         responses_stream_free(&responses_live);
-        buf_free(&text);
+        buf_free(&muse_reasoning);buf_free(&text);
         ds4_tokens_free(&effective_prompt);
         return;
     }
@@ -14359,7 +14421,7 @@ decode_again:
                                 "tool-error continuation appended %d tokens",
                                 recovery_tokens);
                     buf_free(&repaired);
-                    buf_free(&text);
+                    buf_free(&muse_reasoning);buf_free(&text);
                     goto decode_again;
                 }
                 finish = "error";
@@ -14400,7 +14462,7 @@ decode_again:
         anthropic_stream_free(&anthropic_live);
         openai_stream_free(&openai_live);
         responses_stream_free(&responses_live);
-        buf_free(&text);
+        buf_free(&muse_reasoning);buf_free(&text);
         ds4_tokens_free(&effective_prompt);
         return;
     }
@@ -14463,7 +14525,7 @@ decode_again:
                     free(parsed_content);
                     free(parsed_reasoning);
                     tool_calls_free(&parsed_calls);
-                    buf_free(&text);
+                    buf_free(&muse_reasoning);buf_free(&text);
                     goto decode_again;
                 }
                 final_finish = "error";
@@ -14512,10 +14574,11 @@ decode_again:
             anthropic_stream_free(&anthropic_live);
             openai_stream_free(&openai_live);
             responses_stream_free(&responses_live);
-            buf_free(&text);
+            buf_free(&muse_reasoning);buf_free(&text);
             ds4_tokens_free(&effective_prompt);
             return;
         }
+        if(muse_chat && muse_reasoning.len) {free(parsed_reasoning);parsed_reasoning=xstrdup(muse_reasoning.ptr);}
         if (parsed_calls.len) {
             if (openai_live_chat) apply_openai_stream_tool_ids(&parsed_calls, &openai_live);
             if (j->req.api == API_ANTHROPIC && j->req.stream)
@@ -14536,7 +14599,7 @@ decode_again:
         anthropic_stream_free(&anthropic_live);
         openai_stream_free(&openai_live);
         responses_stream_free(&responses_live);
-        buf_free(&text);
+        buf_free(&muse_reasoning);buf_free(&text);
         ds4_tokens_free(&effective_prompt);
         return;
     }
@@ -14744,7 +14807,7 @@ decode_again:
     anthropic_stream_free(&anthropic_live);
     openai_stream_free(&openai_live);
     responses_stream_free(&responses_live);
-    buf_free(&text);
+    buf_free(&muse_reasoning);buf_free(&text);
     ds4_tokens_free(&effective_prompt);
 }
 

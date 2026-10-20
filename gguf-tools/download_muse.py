@@ -22,13 +22,30 @@ REVISION = 'c00670568b6ce5e56a247f67091247984df2a01e'
 PREFIX = 'UD-IQ2_XXS/Muse-Spark-Open-816B-A42B-UD-IQ2_XXS-'
 
 
-def header_prefix(filename, path):
+def verify_sha256(path, expected_hash, filename):
+    if not expected_hash:
+        raise ValueError(f'Pinned shard has no SHA-256 metadata: {filename}')
+    digest = hashlib.sha256()
+    with Path(path).open('rb') as fp:
+        for chunk in iter(lambda: fp.read(32 * 1024**2), b''):
+            digest.update(chunk)
+    if digest.hexdigest() != expected_hash:
+        raise ValueError(f'Shard SHA-256 mismatch: {filename}')
+
+
+def header_prefix(filename, path, expected_hash):
+    metadata_only = filename.endswith('00001-of-00006.gguf')
     if path.exists():
+        if metadata_only:
+            verify_sha256(path, expected_hash, filename)
         return
     # The first split holds the tokenizer/metadata and zero weight tensors.
-    if filename.endswith('00001-of-00006.gguf'):
+    if metadata_only:
         downloaded = hf_hub_download(REPO, filename, revision=REVISION, local_dir=path.parent / 'metadata')
-        shutil.copyfile(downloaded, path)
+        verify_sha256(downloaded, expected_hash, filename)
+        temp = Path(str(path) + '.tmp')
+        shutil.copyfile(downloaded, temp)
+        temp.replace(path)
         return
     limit = 256 * 1024
     url = hf_hub_url(REPO, filename, revision=REVISION) + f'?header=0-{limit - 1}'
@@ -63,7 +80,7 @@ def main(argv=None):
     headers, sizes = [], []
     for index, file in enumerate(files):
         path = staging / f'{index}.header'
-        header_prefix(file.rfilename, path)
+        header_prefix(file.rfilename, path, file.lfs.sha256 if file.lfs else None)
         headers.append(path)
         sizes.append(file.size)
     total, largest = sum(sizes), max(sizes)
@@ -82,16 +99,14 @@ def main(argv=None):
         file = files[index]
         path = Path(hf_hub_download(REPO, file.rfilename, revision=REVISION,
                                     local_dir=staging / 'weights'))
-        expected_hash = file.lfs.sha256 if file.lfs else None
-        if not expected_hash:
-            raise ValueError('Pinned weight shard has no SHA-256 metadata')
-        digest = hashlib.sha256()
         print(f'Verifying shard {index + 1}/{len(files)}', flush=True)
-        with path.open('rb') as fp:
-            for chunk in iter(lambda: fp.read(32 * 1024**2), b''):
-                digest.update(chunk)
-        if digest.hexdigest() != expected_hash:
-            raise ValueError(f'Shard SHA-256 mismatch: {file.rfilename}')
+        verify_sha256(path, file.lfs.sha256 if file.lfs else None, file.rfilename)
+        # Joining uses cached range probes to calculate source offsets. Verify
+        # those bytes against the authenticated shard before copying tensors.
+        with path.open('rb') as src, headers[index].open('rb') as header:
+            for chunk in iter(lambda: header.read(1024**2), b''):
+                if src.read(len(chunk)) != chunk:
+                    raise ValueError(f'Cached GGUF header differs from verified shard: {file.rfilename}')
         return path
 
     def release(index):
@@ -102,7 +117,7 @@ def main(argv=None):
 
     join_gguf(headers, output, sizes=sizes, acquire=acquire, release=release)
     print(f'Native checkpoint complete: {output}', flush=True)
-    print('Native Muse inference is still under implementation; this prepares the weights.')
+    print('Use the native ds4 Metal engine; see docs/MUSE_SPARK.md for validation status.')
     return 0
 
 

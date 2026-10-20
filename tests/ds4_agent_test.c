@@ -858,6 +858,41 @@ static int test_v41_thinking(const char *model) {
     return agent_test_failures ? 1 : 0;
 }
 
+static void test_muse_tool_syntax(void) {
+    {
+        const char *chunks[] = {"<think>literal</think>\n<atem:function_calls>",
+            "<atem:invoke name=\"list\"><atem:parameter name=\"path\">.</atem:parameter>",
+            "</atem:invoke></atem:function_calls>"};
+        agent_dsml_parser p;
+        char *out = agent_test_stream_capture(AGENT_TOOL_SYNTAX_MUSE, chunks, 3, &p, NULL);
+        AGENT_TEST_ASSERT(strstr(out, "<think>literal</think>") != NULL);
+        AGENT_TEST_ASSERT(p.state == AGENT_DSML_DONE && p.calls.len == 1);
+        free(out);agent_dsml_parser_free(&p);
+    }
+    const char text[] =
+        "<atem:function_calls>\n<atem:invoke name=\"write\">\n"
+        "<atem:parameter name=\"path\">123</atem:parameter>\n"
+        "<atem:parameter name=\"content\">  &lt;/atem:parameter>\n"
+        "<think>literal</think>  </atem:parameter>\n"
+        "</atem:invoke>\n</atem:function_calls>";
+    for (size_t split = 0; split < sizeof(text); split++) {
+        agent_dsml_parser p = {.syntax = AGENT_TOOL_SYNTAX_MUSE};
+        agent_dsml_feed(&p, text, split);
+        agent_dsml_feed(&p, text + split, strlen(text) - split);
+        AGENT_TEST_ASSERT(p.state == AGENT_DSML_DONE && p.calls.len == 1);
+        if (p.calls.len == 1) {
+            agent_tool_call *c = &p.calls.v[0];
+            AGENT_TEST_ASSERT(!strcmp(c->name, "write") && c->argc == 2);
+            if (c->argc == 2) {
+                AGENT_TEST_ASSERT(!strcmp(c->args[0].value, "123"));
+                AGENT_TEST_ASSERT(!strcmp(c->args[1].value,
+                    "  &lt;/atem:parameter>\n<think>literal</think>  "));
+            }
+        }
+        agent_dsml_parser_free(&p);
+    }
+}
+
 static void test_qwen_tool_syntax(void) {
     const char text[] =
         "<think>Plan.</think>\n<tool_call>\n<function=list>\n"
@@ -1008,6 +1043,10 @@ static int test_full_context_save(const char *model) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--muse-tools")) {
+        test_muse_tool_syntax();
+        return agent_test_failures ? 1 : 0;
+    }
     if (argc == 3 && !strcmp(argv[1], "--full-context-save")) return test_full_context_save(argv[2]);
     if (argc == 3 && !strcmp(argv[1], "--think-fixture")) return test_v41_thinking(argv[2]);
     if (argc == 2 && !strcmp(argv[1], "--terminal-driver")) return test_terminal_driver();
@@ -1020,6 +1059,7 @@ int main(int argc, char **argv) {
     ds4_agent_unit_tests_run();
     test_v41_tool_syntax();
     test_qwen_tool_syntax();
+    test_muse_tool_syntax();
     test_compaction_boundaries();
     test_observation_error_is_not_context_exhaustion();
     test_atomic_file_tools();

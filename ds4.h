@@ -308,6 +308,7 @@ int ds4_engine_model_id(ds4_engine *e);
 bool ds4_engine_is_glm_dsa(ds4_engine *e);
 bool ds4_engine_is_glm53(ds4_engine *e);
 bool ds4_engine_is_qwen4(ds4_engine *e);
+bool ds4_engine_is_muse(ds4_engine *e);
 /* Qwen3.8 reasoning-effort system instruction for a think mode (NULL when none) */
 const char *ds4_qwen4_reasoning_effort_text(ds4_think_mode mode);
 const char *ds4_backend_name(ds4_backend backend);
@@ -372,6 +373,12 @@ bool ds4_tokens_starts_with(const ds4_tokens *tokens, const ds4_tokens *prefix);
 void ds4_tokenize_text(ds4_engine *e, const char *text, ds4_tokens *out);
 void ds4_tokenize_rendered_chat(ds4_engine *e, const char *text, ds4_tokens *out);
 void ds4_chat_begin(ds4_engine *e, ds4_tokens *tokens);
+void ds4_chat_append_system_prompt(ds4_engine *e, ds4_tokens *tokens, const char *system, ds4_think_mode mode);
+/* Returned protocol text is caller-owned; date NULL selects today's local date. */
+char *ds4_muse_escape_text(const char *text);
+char *ds4_muse_tool_prompt(const char *metadata, const char *functions);
+char *ds4_muse_system_prompt(const char *system, const char *tools, const char *recipients,
+                            ds4_think_mode mode, const char *date);
 void ds4_encode_chat_prompt(
         ds4_engine *e,
         const char *system,
@@ -381,9 +388,21 @@ void ds4_encode_chat_prompt(
 void ds4_chat_append_max_effort_prefix(ds4_engine *e, ds4_tokens *tokens);
 void ds4_chat_append_think_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_mode mode);
 void ds4_chat_append_message(ds4_engine *e, ds4_tokens *tokens, const char *role, const char *content);
+/* Preserve a tool's name on protocols that address results to named tools. */
+void ds4_chat_append_tool_result(ds4_engine *e, ds4_tokens *tokens, const char *name, const char *content);
 void ds4_chat_append_assistant_prefix(ds4_engine *e, ds4_tokens *tokens, ds4_think_mode think_mode);
 
 char *ds4_token_text(ds4_engine *e, int token, size_t *len);
+/* Decode control tokens separately from body text. Literal text such as
+ * "<think>" remains body data in recipient-based protocols. */
+typedef struct {
+    char header[512];
+    uint32_t header_len;
+    bool body, reasoning;
+} ds4_chat_decode_state;
+void ds4_chat_decode_init(ds4_chat_decode_state *state, ds4_think_mode mode);
+char *ds4_chat_decode_token(ds4_engine *e, ds4_chat_decode_state *state,
+                            int token, size_t *len);
 int ds4_token_eos(ds4_engine *e);
 bool ds4_token_is_stop(ds4_engine *e, int token);
 bool ds4_token_is_thinking_control(ds4_engine *e, int token);

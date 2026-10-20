@@ -44,11 +44,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 case "${1:-}" in
     muse-gguf)
         shift
-        exec uv run --script "$ROOT/muse/download_native.py" "$@"
-        ;;
-    muse-oq3e)
-        shift
-        exec uv run --script "$ROOT/muse/download.py" "$@"
+        exec uv run --script "$ROOT/gguf-tools/download_muse.py" "$@"
         ;;
 esac
 OUT_DIR=${DS4_GGUF_DIR:-"$ROOT/gguf"}
@@ -64,7 +60,6 @@ DwarfStar GGUF downloader
 
 Usage:
   ./download_model.sh muse-gguf [--output FILE.gguf] [--dry-run]
-  ./download_model.sh muse-oq3e [--output DIR] [--dry-run]
   ./download_model.sh ds4f-q2 [--token TOKEN]
   ./download_model.sh ds4f-q2-q4 [--token TOKEN]
   ./download_model.sh ds4f-q4 [--token TOKEN]
@@ -102,13 +97,8 @@ Targets:
        verifies its SHA-256, joins without requantization, and releases the
        staged shard. The final file and progress journal are resumable.
        Default: ~/.ds4/models/muse-spark-open-native.gguf. Requires uv.
-       Native ds4 inference support is under implementation.
-
-  muse-oq3e
-       Experimental Muse Spark Open MLX oQ3e checkpoint, about 346 GiB.
-       Requires uv. Use --dry-run to inspect download size, --output to
-       choose a fast SSD. Resumes on rerun. Uses HF_TOKEN if set.
-       Run with ./ds4-muse; native ./ds4 does not yet support Muse.
+       Run with the native ds4 Metal engine. See docs/MUSE_SPARK.md for
+       current validation status and memory requirements.
 
   ds4f-q2
        2-bit routed experts, about 81 GB on disk.

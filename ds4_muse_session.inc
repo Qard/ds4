@@ -14,6 +14,7 @@ static bool muse_memory_admit_for_host(ds4_engine *e,uint64_t graph_bytes,bool f
         uint64_t host,uint64_t recommended) {
     if(!host || !recommended) return false;
     uint64_t budget=MIN(host/8*7,recommended),resident=e->model.size;
+    if(e->muse_memory_budget) budget=MIN(budget,e->muse_memory_budget);
     if(e->ssd_streaming && !weights_streaming_non_routed_bytes(&e->weights,&resident)) return false;
     graph_bytes=MAX(graph_bytes,e->muse_reserved_graph_bytes);
     uint64_t fixed=ds4_add_sat_u64(resident,ds4_add_sat_u64(graph_bytes,
@@ -49,6 +50,20 @@ static bool muse_memory_admit_for_host(ds4_engine *e,uint64_t graph_bytes,bool f
 }
 
 static bool muse_memory_admit(ds4_engine *e,uint64_t bytes,bool fit_cache) {
+    if(!e->muse_memory_budget) {
+        /* Take the available-memory baseline before installing model views or
+         * pinning weights. Counting only physical capacity would overcommit
+         * a Mac that already has another GPU model loaded. Speculative pages
+         * are included in free_count and must not be counted twice. */
+        vm_statistics64_data_t vm={0};mach_msg_type_number_t count=HOST_VM_INFO64_COUNT;
+        mach_port_t host=mach_host_self();
+        kern_return_t rc=host_statistics64(host,HOST_VM_INFO64,(host_info64_t)&vm,&count);
+        mach_port_deallocate(mach_task_self(),host);
+        if(rc!=KERN_SUCCESS) {fprintf(stderr,"ds4: cannot measure available memory for Muse\n");return false;}
+        uint64_t available=((uint64_t)vm.free_count+vm.inactive_count)*(uint64_t)getpagesize();
+        e->muse_memory_budget=available/8*7;
+        if(!e->muse_memory_budget) return false;
+    }
     return muse_memory_admit_for_host(e,bytes,fit_cache,glm_graph_host_memory_bytes(),
                                       ds4_gpu_recommended_working_set_size());
 }
