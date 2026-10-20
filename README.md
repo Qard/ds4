@@ -14,6 +14,10 @@ deliberately narrow, not a general GGUF runner: you need to use the
 GGUF files the project produces, that are part of the project
 itself.
 
+This fork also contains an [experimental Muse Spark Open SSD-streaming runner](docs/MUSE_SPARK.md)
+for 128 GB Apple Silicon Macs. It uses a separate `ds4-muse` entry point and
+MLX checkpoints; Muse is not yet supported by the native `ds4` GGUF engine.
+
 We test things in integration: model loading, prompt rendering,
 tool calls, KV state, the HTTP server, and the coding agent are built and tested together.
 The repository also includes tools and data for GGUF, imatrix, quality, and speed.

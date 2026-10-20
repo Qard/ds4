@@ -105,6 +105,7 @@
 *.o
 *.dSYM/
 __pycache__/
+.venv-muse/
 *.pyc
 /gguf-tools/libds4quants.dylib
 /gguf-tools/libds4quants.so
