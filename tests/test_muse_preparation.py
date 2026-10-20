@@ -17,6 +17,8 @@ class PreparationTests(unittest.TestCase):
             self.assertNotEqual(plan['server'][-1],plan['server_restart'][-1])
             self.assertEqual(plan['server'][:-1],plan['server_restart'][:-1])
             self.assertIn('--require-initial-cache',plan['api_restored'])
+            reasoning=plan['agent_reasoning']
+            self.assertEqual(reasoning[reasoning.index('--temperature')+1],'1')
             self.assertGreater(len((root/'benchmark.txt').read_text().split()),16384)
             self.assertTrue((root/'RUNBOOK.md').exists())
             with self.assertRaises(FileExistsError):prepare(root,repo,model)

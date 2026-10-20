@@ -6,6 +6,7 @@ import codecs
 import errno
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import pty
@@ -28,6 +29,7 @@ parser.add_argument("--ssd-streaming", action="store_true")
 parser.add_argument("--ctx", type=int, default=4096)
 parser.add_argument("--think", action="store_true")
 parser.add_argument("--tokens", type=int, default=1800)
+parser.add_argument("--temperature",type=float,default=0,help="sampling temperature for live generation")
 parser.add_argument("--mtp", action="store_true")
 parser.add_argument("--dspark", type=Path)
 parser.add_argument("--output", type=Path, required=True)
@@ -39,7 +41,7 @@ parser.add_argument("--cache-experts", type=int)
 parser.add_argument("--timeout", type=float, default=360,
                     help="per-turn wait; SSD-streamed models may need a larger value")
 args = parser.parse_args()
-if args.timeout <= 0 or (args.prefill_chunk is not None and args.prefill_chunk <= 0) or (args.cache_experts is not None and args.cache_experts <= 0):
+if not math.isfinite(args.temperature) or args.temperature<0 or args.timeout <= 0 or (args.prefill_chunk is not None and args.prefill_chunk <= 0) or (args.cache_experts is not None and args.cache_experts <= 0):
     parser.error("timeouts and optional cache/prefill sizes must be positive")
 root = args.binary.resolve().parent
 out = args.output.resolve()
@@ -53,7 +55,7 @@ master, slave = pty.openpty()
 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
 cmd = [str(args.binary.resolve()), "-m", str(args.model.resolve()),
        "--ctx", str(args.ctx), "--think" if args.think else "--nothink",
-       "--temp", "0", "--tokens", str(args.tokens),
+       "--temp", str(args.temperature), "--tokens", str(args.tokens),
        "--seed", "12345", "--chdir", str(project), "--trace", str(trace)]
 if args.prefill_chunk:
     cmd += ["--prefill-chunk", str(args.prefill_chunk)]

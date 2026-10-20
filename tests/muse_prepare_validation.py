@@ -46,7 +46,7 @@ def prepare(output,repo,model):
         '--ssd-streaming','--ctx','8192','--prefill-chunk','32','--timeout','3600']
     plan['agent_interrupt']=agent+['--interrupt-only','--output',str(output/'agent-interrupt')]
     plan['agent_compaction']=agent+['--output',str(output/'agent-compaction')]
-    plan['agent_reasoning']=agent+['--think','--output',str(output/'agent-reasoning')]
+    plan['agent_reasoning']=agent+['--think','--temperature','1','--output',str(output/'agent-reasoning')]
     (output/'commands.json').write_text(json.dumps(plan,indent=2)+'\n')
     lines=['# Prepared native Muse validation','',
         'These commands open the full checkpoint. Run only after the LM Studio hold is released.',
