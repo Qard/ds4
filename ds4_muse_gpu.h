@@ -30,4 +30,13 @@ int ds4_gpu_muse_gate_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,
     const ds4_gpu_tensor *gate, uint32_t n);
 int ds4_gpu_muse_logits_tensor(ds4_gpu_tensor *logits, uint32_t n, float scale, float cap);
 
+/* Raw expert outputs [tokens][slots][latent]; Muse applies its input-scaled
+ * per-expert norm before the existing weighted reduction. Gate/up share type. */
+int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
+    const ds4_gpu_tensor *x, const ds4_gpu_tensor *selected,
+    const void *map, uint64_t size, uint64_t gate_offset, uint64_t up_offset,
+    uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
+    uint32_t tokens, uint32_t total, uint32_t slots, uint32_t latent,
+    uint32_t ff, uint32_t layer);
+
 #endif

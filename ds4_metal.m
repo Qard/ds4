@@ -48482,6 +48482,7 @@ static uint32_t qwen4_expert_row_bytes(uint32_t weight_type, uint32_t in_dim) {
     if (in_dim == 0 || (in_dim % 32u) != 0) return 0;
     switch (weight_type) {
     case 8u:  return (in_dim / 32u) * 34u;   /* q8_0 */
+    case 14u: return (in_dim % 256u) ? 0u : (in_dim / 256u) * 210u;   /* q6_K */
     case 12u: return (in_dim % 256u) ? 0u : (in_dim / 256u) * 144u;   /* q4_K */
     case 10u: return (in_dim % 256u) ? 0u : (in_dim / 256u) * 84u;    /* q2_K */
     case 16u: return (in_dim % 256u) ? 0u : (in_dim / 256u) * 66u;    /* iq2_xxs */
@@ -50558,8 +50559,9 @@ static bool muse_weight_bind(muse_bind *b, const void *map, uint64_t size, uint6
     return b->buf != nil;
 }
 
-static int muse_dispatch(const char *name, const void *args, size_t length,
-                         const muse_bind *binds, unsigned count, MTLSize grid) {
+static int muse_dispatch_resources(const char *name, const void *args, size_t length,
+                         const muse_bind *binds, unsigned count, MTLSize grid,
+                         ds4_gpu_stream_expert_cache_entry *const *resources, unsigned resource_count) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
     @autoreleasepool {
         id<MTLComputePipelineState> pipeline = ds4_gpu_get_pipeline(name);
@@ -50567,7 +50569,14 @@ static int muse_dispatch(const char *name, const void *args, size_t length,
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
+        if (resource_count && !ds4_gpu_stream_expert_cache_mark_entries_inflight(resources,resource_count,0)) return 0;
         id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+        if (!enc) return 0;
+        for (unsigned i=0;i<resource_count;i++) {
+            [enc useResource:resources[i]->gate_buffer usage:MTLResourceUsageRead];
+            [enc useResource:resources[i]->up_buffer usage:MTLResourceUsageRead];
+            [enc useResource:resources[i]->down_buffer usage:MTLResourceUsageRead];
+        }
         [enc setComputePipelineState:pipeline];
         [enc setBytes:args length:length atIndex:0];
         for (unsigned i = 0; i < count; i++)
@@ -50576,6 +50585,11 @@ static int muse_dispatch(const char *name, const void *args, size_t length,
         ds4_gpu_end_compute_encoder(cb, enc);
         return ds4_gpu_finish_command_buffer(cb, owned, name);
     }
+}
+
+static int muse_dispatch(const char *name, const void *args, size_t length,
+                         const muse_bind *binds, unsigned count, MTLSize grid) {
+    return muse_dispatch_resources(name,args,length,binds,count,grid,NULL,0);
 }
 
 int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t size,
@@ -50701,4 +50715,84 @@ int ds4_gpu_muse_logits_tensor(ds4_gpu_tensor *logits, uint32_t n, float scale, 
     muse_pointwise_args a = {1,n,scale,cap};
     return muse_dispatch("kernel_muse_logits", &a, sizeof(a), &b, 1,
                          MTLSizeMake(((uint64_t)n+31)/32, 1, 1));
+}
+
+int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
+    const ds4_gpu_tensor *x, const ds4_gpu_tensor *selected,
+    const void *map, uint64_t size, uint64_t gate_offset, uint64_t up_offset,
+    uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
+    uint32_t tokens, uint32_t total, uint32_t slots, uint32_t latent,
+    uint32_t ff, uint32_t layer) {
+    if (!tokens || tokens > 1048576 || !total || total > 384 || !slots ||
+        slots > DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED || slots > total ||
+        !latent || latent > 8192 || !ff || ff > 16384 || layer >= 80) return 0;
+    uint32_t gate_row = qwen4_expert_row_bytes(gate_type, latent);
+    uint32_t down_row = qwen4_expert_row_bytes(down_type, ff);
+    uint64_t gate_bytes = (uint64_t)gate_row*ff, down_bytes = (uint64_t)down_row*latent;
+    if (!map || !gate_row || !down_row || gate_offset > size || up_offset > size || down_offset > size ||
+        gate_bytes*total > size-gate_offset || gate_bytes*total > size-up_offset ||
+        down_bytes*total > size-down_offset) return 0;
+    muse_bind check;
+    if (!muse_tensor(&check, x, (uint64_t)tokens*latent*4) ||
+        !muse_tensor(&check, selected, (uint64_t)tokens*slots*4) ||
+        !muse_tensor(&check, mid, (uint64_t)tokens*slots*ff*4) ||
+        !muse_tensor(&check, part, (uint64_t)tokens*slots*latent*4)) return 0;
+    if (!g_ssd_streaming_mode) {
+        return ds4_gpu_qwen4_moe_mid_tensor(mid,x,selected,map,size,gate_offset,up_offset,
+                   gate_type,total,tokens,slots,latent,ff,0,0,UINT32_MAX) &&
+               ds4_gpu_qwen4_moe_down_tensor(part,mid,selected,map,size,down_offset,
+                   down_type,total,tokens,slots,ff,latent,0,UINT32_MAX);
+    }
+    if (!ds4_gpu_stream_expert_cache_note_expert_size(gate_bytes,down_bytes)) return 0;
+    const uint32_t budget = ds4_gpu_stream_expert_cache_configured_budget();
+    if (budget < slots) {
+        fprintf(stderr,"ds4: Muse SSD cache must hold at least %u experts\n",slots);
+        return 0;
+    }
+    /* Splitting a prefill keeps every selected expert inside explicit cache
+     * buffers, including when a user requests a very small cache. No mapped
+     * expert-bank overflow is permitted on this path. */
+    uint32_t row_cap = MAX(1u,budget/slots);
+    for (uint32_t first=0; first<tokens;) {
+        uint32_t rows = MIN(tokens-first,row_cap);
+        ds4_gpu_tensor *views[4] = {
+            ds4_gpu_tensor_view(x,(uint64_t)first*latent*4,(uint64_t)rows*latent*4),
+            ds4_gpu_tensor_view(selected,(uint64_t)first*slots*4,(uint64_t)rows*slots*4),
+            ds4_gpu_tensor_view(mid,(uint64_t)first*slots*ff*4,(uint64_t)rows*slots*ff*4),
+            ds4_gpu_tensor_view(part,(uint64_t)first*slots*latent*4,(uint64_t)rows*slots*latent*4),
+        };
+        bool ok = views[0] && views[1] && views[2] && views[3];
+        bool had_batch = g_batch_cb != nil;
+        if (ok && had_batch) ok = ds4_gpu_end_commands();
+        id<MTLBuffer> ga=nil, ua=nil, da=nil, og=nil, ou=nil, od=nil;
+        ds4_gpu_stream_expert_cache_entry *resources[DS4_METAL_STREAM_EXPERT_CACHE_MAX_EXPERT];
+        uint32_t resource_count=0, unique=0;
+        if (ok) {
+            g_stream_prefill_batch_selected_addr_building++;
+            ok = ds4_gpu_stream_expert_cache_prepare_selected_batch(map,size,layer,views[1],rows,
+                total,slots,gate_offset,up_offset,down_offset,gate_bytes,down_bytes,
+                &ga,&ua,&da,resources,&resource_count,&unique,&og,&ou,&od);
+            g_stream_prefill_batch_selected_addr_building--;
+        }
+        if (ok) ok = !og && !ou && !od && unique && unique == resource_count;
+        if (ok && had_batch) ok = ds4_gpu_begin_commands();
+        if (ok) {
+            struct {uint32_t tokens, slots, latent, ff, gate_type, down_type, gate_row, down_row, total;} a = {
+                rows,slots,latent,ff,gate_type,down_type,gate_row,down_row,total};
+            muse_bind b[5] = {{ga,0},{ua,0}};
+            ok = muse_tensor(&b[2],views[1],(uint64_t)rows*slots*4) &&
+                 muse_tensor(&b[3],views[0],(uint64_t)rows*latent*4) &&
+                 muse_tensor(&b[4],views[2],(uint64_t)rows*slots*ff*4);
+            if (ok) ok = muse_dispatch_resources("kernel_muse_expert_mid",&a,sizeof(a),b,5,
+                MTLSizeMake(ff,slots,rows),resources,resource_count);
+            muse_bind down[4] = {{da,0},b[2],b[4]};
+            if (ok) ok = muse_tensor(&down[3],views[3],(uint64_t)rows*slots*latent*4) &&
+                muse_dispatch_resources("kernel_muse_expert_down",&a,sizeof(a),down,4,
+                    MTLSizeMake(latent,slots,rows),resources,resource_count);
+        }
+        for (unsigned i=0;i<4;i++) ds4_gpu_tensor_free(views[i]);
+        if (!ok) return 0;
+        first += rows;
+    }
+    return 1;
 }

@@ -120,3 +120,5 @@ __pycache__/
 /tests/test_muse_metal
 /tests/test_muse_gguf
 /tests/test_muse_attention
+
+/tests/test_muse_experts

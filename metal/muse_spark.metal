@@ -138,3 +138,36 @@ kernel void kernel_muse_logits(constant muse_pointwise_args &a,
     uint i = group*32+lane;
     if (i < a.width) logits[i] = a.cap*metal::precise::tanh(logits[i]*a.scale/a.cap);
 }
+
+struct muse_expert_args {
+    uint tokens, slots, latent, ff, gate_type, down_type, gate_row, down_row, total;
+};
+
+/* The existing native SSD cache owns these GPU addresses and their lifetime.
+ * Routing weights intentionally apply only after the per-expert post norm. */
+kernel void kernel_muse_expert_mid(constant muse_expert_args &a,
+    device const uint64_t *gates, device const uint64_t *ups,
+    device const int *selected, device const float *x, device float *mid,
+    uint3 group [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]]) {
+    uint row = group.x, slot = group.y, tok = group.z;
+    int expert = selected[size_t(tok)*a.slots+slot];
+    if (expert < 0 || uint(expert) >= a.total) return;
+    device const char *gate = reinterpret_cast<device const char *>(gates[expert])+size_t(row)*a.gate_row;
+    device const char *up = reinterpret_cast<device const char *>(ups[expert])+size_t(row)*a.gate_row;
+    device const float *input = x+size_t(tok)*a.latent;
+    float g = ds4_quant_row_dot(gate,input,a.gate_type,a.latent,lane);
+    float u = ds4_quant_row_dot(up,input,a.gate_type,a.latent,lane);
+    if (lane == 0) mid[(size_t(tok)*a.slots+slot)*a.ff+row] = g/(1.f+exp(-g))*u;
+}
+
+kernel void kernel_muse_expert_down(constant muse_expert_args &a,
+    device const uint64_t *downs, device const int *selected,
+    device const float *mid, device float *part,
+    uint3 group [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]]) {
+    uint row = group.x, slot = group.y, tok = group.z;
+    int expert = selected[size_t(tok)*a.slots+slot];
+    if (expert < 0 || uint(expert) >= a.total) return;
+    device const char *down = reinterpret_cast<device const char *>(downs[expert])+size_t(row)*a.down_row;
+    float v = ds4_quant_row_dot(down,mid+(size_t(tok)*a.slots+slot)*a.ff,a.down_type,a.ff,lane);
+    if (lane == 0) part[(size_t(tok)*a.slots+slot)*a.latent+row] = v;
+}

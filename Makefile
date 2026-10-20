@@ -1444,3 +1444,10 @@ tests/test_muse_attention: tests/test_muse_attention.c ds4_muse_gpu.h $(CORE_OBJ
 .PHONY: test-muse-attention
 test-muse-attention: tests/test_muse_attention
 	./tests/test_muse_attention
+
+tests/test_muse_experts: tests/test_muse_experts.c ds4_muse_gpu.h $(CORE_OBJS)
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $< $(CORE_OBJS) $(METAL_LDLIBS)
+
+.PHONY: test-muse-experts
+test-muse-experts: tests/test_muse_experts
+	./tests/test_muse_experts
