@@ -15,8 +15,9 @@ class CheckpointReferenceTests(unittest.TestCase):
             expected=reference(weights)[-1]
             run=subprocess.run([sys.executable,str(Path(__file__).with_name('muse_checkpoint_reference.py')),
                 '--model',str(model),'--prompt-ids',str(ids),'--output',str(out),
-                '--experts-per-token','2','--window','4'],capture_output=True,text=True)
+                '--experts-per-token','2','--window','4','--trace-directory',str(root/'trace')],capture_output=True,text=True)
             self.assertEqual(run.returncode,0,run.stderr)
+            self.assertEqual(np.fromfile(root/'trace/layer-00.residual.f32',dtype='<f4').size,10*weights['token_embd.weight'].shape[1])
             actual=np.fromfile(out,dtype='<f4')
             self.assertLess(float(np.max(np.abs(actual-expected))),5e-5)
             self.assertEqual(int(actual.argmax()),int(expected.argmax()))

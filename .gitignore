@@ -137,3 +137,5 @@ __pycache__/
 /tests/test_muse_native_live
 
 /tests/test_muse_cli
+
+tests/test_muse_checkpoint_trace

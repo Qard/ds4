@@ -1,5 +1,7 @@
 /* Whole native Muse graph at a bounded test shape, bypassing only the fixed
  * production-profile selector. Tensor binding and every GPU op are real. */
+static unsigned observed_layers;
+#define DS4_MUSE_LAYER_OBSERVER(g,layer,tokens) (++observed_layers != 0)
 #include "../ds4.c"
 #include <assert.h>
 
@@ -28,7 +30,9 @@ int main(int argc, char **argv) {
     int ids[]={1,2,3,4,5,6,7,8,9,10}; float logits[10*32],first_logits[32];
     for(unsigned first=0;first<10;) {
         unsigned n=MIN(chunk,10-first);
+        observed_layers=0;
         assert(muse_graph_forward(&g,&m,&w,ids+first,n,logits,true));
+        assert(observed_layers==DS4_N_LAYER);
         if(!first) memcpy(first_logits,logits,sizeof(first_logits));
         float last[32];
         assert(muse_graph_forward(&last_graph,&m,&w,ids+first,n,last,false));

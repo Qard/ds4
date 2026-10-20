@@ -1347,7 +1347,7 @@ ds4_cpu_test_hooks.o ds4_cuda_test_hooks.o tests/test_session_state.o \
 tests/test_session_state_gpu.o: ds4_tool_text.h
 
 clean:
-	rm -f tests/test_muse_cli tests/test_muse_native_live tests/test_muse_metal tests/test_muse_gguf tests/test_muse_attention tests/test_muse_experts tests/test_muse_graph tests/test_muse_tokenizer tests/test_muse_session tests/test_muse_memory tests/test_muse_chat tests/test_muse_decode tests/test_muse_server tests/test_muse_agent tests/test_muse_eval tests/test_muse_quant
+	rm -f tests/test_muse_checkpoint_trace tests/test_muse_cli tests/test_muse_native_live tests/test_muse_metal tests/test_muse_gguf tests/test_muse_attention tests/test_muse_experts tests/test_muse_graph tests/test_muse_tokenizer tests/test_muse_session tests/test_muse_memory tests/test_muse_chat tests/test_muse_decode tests/test_muse_server tests/test_muse_agent tests/test_muse_eval tests/test_muse_quant
 	rm -f tests/test_mmvq_cuda tests/test_mmvq_rocm
 	rm -f tests/test_qwen4_ngrams
 	rm -f tests/test_qwen4_ngram_state
@@ -1584,3 +1584,8 @@ test-muse-cli: tests/test_muse_cli
 .PHONY: test-muse-checkpoint-reference
 test-muse-checkpoint-reference:
 	uv run --with 'numpy>=2,<3' --with gguf==0.19.0 python -m unittest discover -s tests -p test_muse_checkpoint_reference.py -v
+
+tests/test_muse_checkpoint_trace.o: tests/test_muse_checkpoint_trace.c ds4.c ds4_muse_graph.inc ds4_muse_session.inc ds4_muse_payload.inc ds4_muse_gpu.h ds4_muse_tokenizer.inc ds4_muse_unicode.inc ds4_muse_chat.inc ds4.h
+	$(CC) $(CFLAGS) -Wno-unused-function -I. -c -o $@ $<
+tests/test_muse_checkpoint_trace: tests/test_muse_checkpoint_trace.o $(filter-out ds4.o,$(CORE_OBJS))
+	$(CC) $(CFLAGS) -I. -o $@ $^ $(METAL_LDLIBS)

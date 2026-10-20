@@ -25,7 +25,9 @@ parser.add_argument('--prompt-ids',required=True,type=Path)
 parser.add_argument('--output',required=True,type=Path)
 parser.add_argument('--experts-per-token',type=int,default=8)
 parser.add_argument('--window',type=int,default=2048)
+parser.add_argument('--trace-directory',type=Path)
 args=parser.parse_args()
+if args.trace_directory:args.trace_directory.mkdir(parents=True,exist_ok=False)
 if args.output.exists():parser.error('output must be new')
 r=Reader(str(args.model));ids=np.fromfile(args.prompt_ids,dtype='<i4');T=len(ids)
 # This oracle intentionally bounds prompt and operator memory. It never maps
@@ -75,6 +77,9 @@ for layer in range(layers):
             z=np.empty_like(y);z[...,::2]=y[...,::2]*c-y[...,1::2]*s;z[...,1::2]=y[...,::2]*s+y[...,1::2]*c;return z
         q,k=rotate(q),rotate(k)
     k=k.astype(np.float16).astype(np.float32);att=np.empty_like(q)
+    if args.trace_directory:
+        q.astype('<f4').tofile(args.trace_directory/f'layer-{layer:02}.q.f32')
+        k.astype('<f2').tofile(args.trace_directory/f'layer-{layer:02}.key.f16')
     for t in range(T):
         lo=max(0,t-args.window+1) if sliding else 0
         keys=np.repeat(k[lo:t+1],heads//kv_heads,axis=1);values=np.repeat(val[lo:t+1],heads//kv_heads,axis=1)
@@ -84,7 +89,7 @@ for layer in range(layers):
     branch=mm('attn_output',norm(att).reshape(T,dim)*sigmoid(mm('attn_gate',h)))
     x=x*v('attn_resid_alpha')+norm(branch,eps=1e-8)*v('attn_resid_beta')
     h=norm(x,v('ffn_norm'));latent=norm(mm('ffn_latent_down',h),v('ffn_pre_exp_norm'))
-    prob=sigmoid(mm('ffn_gate_inp',h));selected=np.argsort(-(prob+vector(p+'exp_probs_b.bias')),axis=-1,kind='stable')[:,:args.experts_per_token]
+    router=mm('ffn_gate_inp',h);prob=sigmoid(router);selected=np.argsort(-(prob+vector(p+'exp_probs_b.bias')),axis=-1,kind='stable')[:,:args.experts_per_token]
     routes=np.take_along_axis(prob,selected,axis=-1);routes/=np.maximum(routes.sum(axis=-1,keepdims=True),np.float32(6.103515625e-5))
     combined=np.zeros_like(latent);post=v('ffn_post_exp_norm')
     for expert in np.unique(selected):
@@ -94,6 +99,11 @@ for layer in range(layers):
         combined[tokens]+=routes[tokens,slots,None]*norm(raw,post,eps=1e-8,pre=True)
     branch=norm(mm('ffn_latent_up',combined),v('post_ffw_norm'),eps=1e-8,pre=True)
     x=x*v('ffn_resid_alpha')+branch*v('ffn_resid_beta')
+    if args.trace_directory:
+        x.astype('<f4').tofile(args.trace_directory/f'layer-{layer:02}.residual.f32')
+        h.astype('<f4').tofile(args.trace_directory/f'layer-{layer:02}.ffn_norm.f32')
+        router.astype('<f4').tofile(args.trace_directory/f'layer-{layer:02}.router.f32')
+        selected.astype('<i4').tofile(args.trace_directory/f'layer-{layer:02}.selected.i32')
     print(json.dumps({'layer':layer,'seconds':time.monotonic()-start,'rms':float(np.sqrt(np.mean(x*x))),'experts':selected.tolist()}),flush=True)
 logits=linear('output.weight',norm(x[-1:],vector('output_norm.weight')))
 logits=20*np.tanh(logits*np.float32(.1767766953)/20)

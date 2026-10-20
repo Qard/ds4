@@ -154,6 +154,11 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
                 T,DS4_N_EMBD,g_ds4_shape.post_norm_eps) &&
             ds4_gpu_muse_residual_tensor(g->r,g->r,g->branch,m->map,m->size,
                 l->ffn_resid_alpha->abs_offset,l->ffn_resid_beta->abs_offset,T,DS4_N_EMBD);
+#ifdef DS4_MUSE_LAYER_OBSERVER
+        /* Test builds can observe layer boundaries without a runtime hook in
+         * production. Observers must leave a command buffer active on success. */
+        if(ok) ok=DS4_MUSE_LAYER_OBSERVER(g,il,T);
+#endif
     }
     uint32_t rows=all_rows?T:1;
     ds4_gpu_tensor *last=NULL;
