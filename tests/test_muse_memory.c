@@ -22,6 +22,7 @@ int main(int argc,char **argv) {
     assert(!muse_memory_admit_for_host(&e,graph,true,16*gib,12*gib));
     e.ssd_streaming_cache_experts=0;e.ssd_streaming_cache_bytes=0;
     e.simulated_memory.bytes=16*gib;
+    assert(muse_memory_available_budget(&e,64*gib)==70*gib);
     assert(muse_memory_admit_for_host(&e,graph,true,128*gib,96*gib));
     assert(e.ssd_streaming_cache_experts<count);
     e.simulated_memory.bytes=0;e.ssd_streaming_cache_experts=0;e.ssd_streaming_cache_bytes=0;

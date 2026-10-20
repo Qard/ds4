@@ -10,6 +10,12 @@ static uint64_t muse_session_memory_bytes(uint32_t context,uint32_t cap) {
     return muse_graph_bytes(context,cap)+2ull*DS4_N_VOCAB*sizeof(float)+sizeof(ds4_session);
 }
 
+static uint64_t muse_memory_available_budget(const ds4_engine *e,uint64_t available) {
+    /* Diagnostic memory is already locked when host availability is sampled.
+     * Restore it to this baseline because fixed admission charges it below. */
+    return ds4_add_sat_u64(available,e->simulated_memory.bytes)/8*7;
+}
+
 static bool muse_memory_admit_for_host(ds4_engine *e,uint64_t graph_bytes,bool fit_cache,
         uint64_t host,uint64_t recommended) {
     if(!host || !recommended) return false;
@@ -61,7 +67,7 @@ static bool muse_memory_admit(ds4_engine *e,uint64_t bytes,bool fit_cache) {
         mach_port_deallocate(mach_task_self(),host);
         if(rc!=KERN_SUCCESS) {fprintf(stderr,"ds4: cannot measure available memory for Muse\n");return false;}
         uint64_t available=((uint64_t)vm.free_count+vm.inactive_count)*(uint64_t)getpagesize();
-        e->muse_memory_budget=available/8*7;
+        e->muse_memory_budget=muse_memory_available_budget(e,available);
         if(!e->muse_memory_budget) return false;
     }
     return muse_memory_admit_for_host(e,bytes,fit_cache,glm_graph_host_memory_bytes(),
