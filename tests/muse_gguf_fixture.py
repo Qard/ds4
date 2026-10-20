@@ -49,6 +49,8 @@ def fixture(path, bad=None):
             tensors.append((f'blk.{i}.ffn_{name}_exps.weight', 16, [4096, 4096, 256]))
     if bad == 'norm':
         tensors = [(n, 8 if n == 'blk.0.ffn_post_exp_norm.weight' else k, d) for n, k, d in tensors]
+    if bad == 'pair':
+        tensors = [(n, 8 if n == 'blk.0.ffn_up_exps.weight' else k, d) for n, k, d in tensors]
     if bad == 'missing': tensors = [t for t in tensors if t[0] != 'blk.0.attn_gate.weight']
     header = b'GGUF' + struct.pack('<IQQ', 3, len(tensors), len(kv))
     header += b''.join(kv_bytes(*entry) for entry in kv)
@@ -67,7 +69,7 @@ def fixture(path, bad=None):
 if __name__ == '__main__':
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / 'sparse.gguf'
-        for bad in (None, 'latent', 'pattern', 'norm', 'missing'):
+        for bad in (None, 'latent', 'pattern', 'norm', 'missing', 'pair'):
             fixture(path, bad)
             result = subprocess.run([sys.argv[1], str(path)], capture_output=True, text=True)
             if (result.returncode == 0) != (bad is None):

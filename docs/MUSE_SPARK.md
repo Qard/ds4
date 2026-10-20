@@ -3,8 +3,9 @@
 [README](../README.md)
 
 The intended execution path is the native `ds4` C/Metal engine, using its
-bounded SSD expert cache. Native loading and graph primitives are being added.
-**Full-model native generation, session support, and throughput are not yet
+bounded SSD expert cache. Native tensor loading, attention, routing, residuals,
+expert execution, and the whole-model graph pass bounded reference tests.
+**Full-checkpoint native generation, session support, and throughput are not yet
 validated. Native inference is disabled until graph integration is complete.**
 
 ## Download for native ds4

@@ -590,6 +590,7 @@ typedef struct {
     uint32_t n_ple_head_dim;
     int32_t ple_eos_id;
     float rms_eps;
+    float post_norm_eps, logit_scale, logit_softcap;
     float hc_eps;
     float expert_weight_scale;
     float swiglu_clamp_exp;
@@ -610,6 +611,7 @@ static const ds4_shape DS4_SHAPE_MUSE_SPARK = {
     .n_rot = 64, .n_expert = 256, .n_expert_used = 8,
     .n_ff_exp = 4096, .n_moe_latent = 4096, .n_swa = 2048,
     .rms_eps = 1e-5f, .expert_weight_scale = 1.f, .rope_freq_base = 500000.f,
+    .post_norm_eps = 1e-8f, .logit_scale = .1767766953f, .logit_softcap = 20.f,
 };
 static uint32_t g_muse_swa[DS4_MAX_LAYER];
 
@@ -5726,6 +5728,8 @@ static void weights_validate_muse_layout(const ds4_weights *w, uint32_t start,
 #define MUSE_VALIDATE(field, suffix, kind, rank, d0, d1, d2) \
         tensor_expect_muse_layout(l->field, kind, rank, d0, d1, d2);
         MUSE_LAYER_TENSORS(MUSE_VALIDATE)
+        if (l->ffn_gate_exps->type != l->ffn_up_exps->type)
+            ds4_die("Muse gate and up expert quantization must match");
 #undef MUSE_VALIDATE
     }
 }
@@ -61322,6 +61326,11 @@ typedef struct {
     uint32_t token_count;
     uint8_t fingerprint[32];
 } ds4_vision_identity;
+
+#if defined(__APPLE__) && !defined(DS4_NO_GPU)
+#include "ds4_muse_gpu.h"
+#include "ds4_muse_graph.inc"
+#endif
 
 struct ds4_session {
     ds4_engine *engine;
