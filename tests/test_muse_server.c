@@ -165,4 +165,25 @@ static void test_muse_literal_tool_channels(ds4_engine *engine) {
     assert(!calls.len && !strcmp(finish,"error"));
     free(content);free(hidden);ds4_tokens_free(&tokens);buf_free(&visible);buf_free(&reasoning);buf_free(&tools);request_free(&r);
 }
-int main(int argc,char **argv) {assert(argc==2);ds4_engine *engine=ds4_test_muse_tokenizer_engine(argv[1]);test_muse_literal_tool_channels(engine);test_muse_anthropic_schema();test_muse_sampling();test_muse_model_listing(engine);test_muse_hidden_reasoning_stream();test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();ds4_engine_close(engine);puts("Muse server prompt, model listing and ATEM roundtrip: PASS");}
+static void check_muse_grouped_tool_replay(ds4_engine *engine,const char *raw,bool single_block) {
+    char *content=NULL,*reasoning=NULL;tool_calls calls={0};
+    assert(parse_muse_generated_message(raw,&content,&reasoning,&calls,NULL) && calls.len==2);
+    chat_msg message={.role="assistant",.content="",.calls=calls};buf rendered={0};append_muse_assistant(&rendered,&message,false);
+    if(single_block) assert(strstr(rendered.ptr,raw));
+    ds4_tokens tokens={0};ds4_tokenize_rendered_chat(engine,rendered.ptr,&tokens);
+    ds4_chat_decode_state state;ds4_chat_decode_init(&state);buf replay={0};
+    for(int i=0;i<tokens.len;i++) {size_t n=0;char *piece=ds4_chat_decode_token(engine,&state,tokens.v[i],&n);assert(piece);if(state.tool_call)buf_append(&replay,piece,n);free(piece);}
+    assert(!strcmp(replay.ptr,raw));
+    char *visible=NULL,*hidden=NULL;tool_calls replayed={0};
+    assert(parse_muse_generated_message(replay.ptr,&visible,&hidden,&replayed,NULL));
+    assert(replayed.len==2 && !strcmp(replayed.v[0].name,"bash") && !strcmp(replayed.v[1].name,"read"));
+    free(visible);free(hidden);tool_calls_free(&replayed);buf_free(&replay);ds4_tokens_free(&tokens);buf_free(&rendered);free(content);free(reasoning);tool_calls_free(&calls);
+}
+static void test_muse_grouped_tool_replay(ds4_engine *engine) {
+    check_muse_grouped_tool_replay(engine,"<atem:function_calls><atem:invoke name=\"bash\"></atem:invoke><atem:invoke name=\"read\"></atem:invoke></atem:function_calls>",true);
+    const char *raw="<atem:function_calls><atem:invoke name=\"bash\"><atem:parameter name=\"command\">printf '</atem:function_calls>'</atem:parameter></atem:invoke><atem:invoke name=\"read\"><atem:parameter name=\"path\">example</atem:parameter></atem:invoke></atem:function_calls>";
+    check_muse_grouped_tool_replay(engine,raw,true);
+    check_muse_grouped_tool_replay(engine,"<atem:function_calls><atem:invoke name=\"bash\"></atem:invoke></atem:function_calls><atem:function_calls><atem:invoke name=\"read\"></atem:invoke></atem:function_calls>",false);
+}
+
+int main(int argc,char **argv) {assert(argc==2);ds4_engine *engine=ds4_test_muse_tokenizer_engine(argv[1]);test_muse_grouped_tool_replay(engine);test_muse_literal_tool_channels(engine);test_muse_anthropic_schema();test_muse_sampling();test_muse_model_listing(engine);test_muse_hidden_reasoning_stream();test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();ds4_engine_close(engine);puts("Muse server prompt, model listing and ATEM roundtrip: PASS");}

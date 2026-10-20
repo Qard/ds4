@@ -1,6 +1,8 @@
 /* Text-only Muse adapter. The server already normalizes schemas and splits
  * Anthropic result blocks; reuse those representations rather than parsing a
  * second request format here. */
+static bool muse_parse_tool_block(const char **cursor,tool_calls *calls,
+                                  const tool_schema_orders *orders);
 static void append_muse_text(buf *out,const char *text) {
     char *escaped=ds4_muse_escape_text(text);buf_puts(out,escaped);free(escaped);
 }
@@ -88,12 +90,21 @@ static void append_muse_assistant(buf *out,const chat_msg *m,bool same_role) {
     if(m->calls.len) {
         if(content[0]) {muse_message_open(out,"assistant to=commentary");append_muse_text(out,content);buf_puts(out,"<|eom|>");}
         const char *raw=m->calls.raw_tool_text;
-        for(int j=0;j<m->calls.len;j++) {
-            buf_puts(out,"<|start|>assistant to=");append_muse_header_text(out,m->calls.v[j].name);buf_puts(out,"<|message|>");
-            const char *end=raw?strstr(raw,"</atem:function_calls>"):NULL;
-            if(end) {end+=strlen("</atem:function_calls>");buf_append(out,raw,end-raw);raw=end;}
-            else append_muse_tool_call(out,&m->calls.v[j]);
-            buf_puts(out,j+1<m->calls.len || same_role?"<|eom|>":"<|eot|>");
+        for(int j=0;j<m->calls.len;) {
+            const char *end=raw;tool_calls group={0};
+            bool exact=raw && muse_parse_tool_block(&end,&group,NULL) &&
+                       group.len>0 && group.len<=m->calls.len-j;
+            if(exact) for(int k=0;k<group.len;k++)
+                if(!m->calls.v[j+k].name || strcmp(group.v[k].name,m->calls.v[j+k].name)) exact=false;
+            int count=exact?group.len:1;
+            const char *recipient=m->calls.v[j].name;
+            if(exact) for(int k=1;k<count;k++)
+                if(strcmp(recipient,m->calls.v[j+k].name)) {recipient="tool";break;}
+            buf_puts(out,"<|start|>assistant to=");append_muse_header_text(out,recipient);buf_puts(out,"<|message|>");
+            if(exact) {buf_append(out,raw,end-raw);raw=end;}
+            else {raw=NULL;append_muse_tool_call(out,&m->calls.v[j]);}
+            tool_calls_free(&group);j+=count;
+            buf_puts(out,j<m->calls.len || same_role?"<|eom|>":"<|eot|>");
         }
     } else if(content[0] || !reasoning[0]) {
         muse_message_open(out,"assistant to=user");append_muse_text(out,content);buf_puts(out,"<|eot|>");
