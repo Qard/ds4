@@ -19,7 +19,7 @@ int main(int argc, char **argv) {
     assert(ds4_gpu_init());
     bool streamed=atoi(argv[3])!=0;
     ds4_gpu_set_ssd_streaming(streamed);
-    ds4_gpu_set_streaming_expert_cache_budget(2);
+    ds4_gpu_set_streaming_expert_cache_budget(atoi(argv[3])==2?4:2);
     assert(ds4_gpu_set_model_map(m.map,m.size) && ds4_gpu_set_model_fd(m.fd));
     unsigned chunk=atoi(argv[4]);
     ds4_muse_gpu_graph g,last_graph;

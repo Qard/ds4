@@ -42,6 +42,6 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     const void *map, uint64_t size, uint64_t gate_offset, uint64_t up_offset,
     uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
     uint32_t tokens, uint32_t total, uint32_t slots, uint32_t latent,
-    uint32_t ff, uint32_t layer);
+    uint32_t ff, uint32_t layer,ds4_gpu_tensor *lists,ds4_gpu_tensor *counts);
 
 #endif

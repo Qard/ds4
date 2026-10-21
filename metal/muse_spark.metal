@@ -297,3 +297,101 @@ kernel void kernel_muse_expert_down(constant muse_expert_args &a,
     float v = ds4_quant_row_dot(down,mid+(size_t(tok)*a.slots+slot)*a.ff,a.down_type,a.ff,lane);
     if (lane == 0) part[(size_t(tok)*a.slots+slot)*a.latent+row] = v;
 }
+
+/* Pair lists are built by the shared Qwen operator. Their ordering is free:
+ * each RHS keeps the original per-lane IQ2 FMAs and writes its own flat slot. */
+struct muse_expert_batch_args {
+    muse_expert_args base;
+    uint list_cap,tiles,experts[512];
+};
+
+template <ushort N>
+static inline float4 muse_iq2_batch_dot(device const char *row,
+    device const float *x0,device const float *x1,device const float *x2,device const float *x3,
+    uint width,ushort lane) {
+    device const float *inputs[4]={x0,x1,x2,x3};
+    float4 acc=0.f;
+    uint sub=lane/4,j=lane%4;
+    for(uint b=0;b<width/256;b++) {
+        device const uchar *block=(device const uchar *)(row+size_t(b)*66);
+        device const ushort *q=(device const ushort *)(block+2)+4*sub;
+        uint grids=uint(q[0])|(uint(q[1])<<16),scales=uint(q[2])|(uint(q[3])<<16);
+        float d=float(*(device const half *)block)*(0.5f+float(scales>>28))*0.25f;
+        constant const uchar *grid=(constant const uchar *)(ds4_metal_iq2xxs_grid+((grids>>(8*j))&255u));
+        uint signs=ds4_metal_ksigns_iq2xs[(scales>>(7*j))&127u];
+        uint base=b*256+sub*32+j*8;float4 part=0.f;
+#pragma unroll
+        for(uint i=0;i<8;i++) {
+            float value=float(grid[i]);bool neg=((signs>>i)&1u)!=0;
+#pragma unroll
+            for(uint r=0;r<N;r++) {
+                float v=inputs[r][base+i];part[r]=fma(value,neg?-v:v,part[r]);
+            }
+        }
+#pragma unroll
+        for(uint r=0;r<N;r++) acc[r]=fma(d,part[r],acc[r]);
+    }
+    return float4(simd_sum(acc.x),simd_sum(acc.y),simd_sum(acc.z),simd_sum(acc.w));
+}
+
+static inline float4 muse_iq2_batch_select(device const char *row,
+    device const float *x0,device const float *x1,device const float *x2,device const float *x3,
+    uint width,ushort lane,uint n) {
+    if(n==1) return float4(ds4_quant_row_dot(row,x0,16,width,lane),0.f,0.f,0.f);
+    if(n==2) return muse_iq2_batch_dot<2>(row,x0,x1,x2,x3,width,lane);
+    if(n==3) return muse_iq2_batch_dot<3>(row,x0,x1,x2,x3,width,lane);
+    return muse_iq2_batch_dot<4>(row,x0,x1,x2,x3,width,lane);
+}
+
+kernel void kernel_muse_expert_mid_iq2_batch(constant muse_expert_batch_args &b,
+    device const uint64_t *gates,device const uint64_t *ups,device const float *x,device float *mid,
+    device const int *lists,device const int *counts,
+    uint3 group [[threadgroup_position_in_grid]],ushort lane [[thread_index_in_simdgroup]],
+    ushort simd [[simdgroup_index_in_threadgroup]],uint3 threads [[threads_per_threadgroup]]) {
+    constant muse_expert_args &a=b.base;
+    uint row=group.x*threads.y+simd,expert=b.experts[group.y],count=uint(counts[expert]);
+    uint first=group.z*4;
+    if(first>=count || row>=a.ff) return;
+    device const char *gate=reinterpret_cast<device const char *>(gates[expert])+size_t(row)*a.gate_row;
+    device const char *up=reinterpret_cast<device const char *>(ups[expert])+size_t(row)*a.gate_row;
+    for(;first<count;first+=b.tiles*4) {
+        uint n=min(4u,count-first);int pair[4];
+#pragma unroll
+        for(uint r=0;r<4;r++) pair[r]=lists[size_t(expert)*b.list_cap+first+(r<n?r:0)];
+        device const float *x0=x+size_t(uint(pair[0])/a.slots)*a.latent;
+        device const float *x1=x+size_t(uint(pair[1])/a.slots)*a.latent;
+        device const float *x2=x+size_t(uint(pair[2])/a.slots)*a.latent;
+        device const float *x3=x+size_t(uint(pair[3])/a.slots)*a.latent;
+        float4 g=muse_iq2_batch_select(gate,x0,x1,x2,x3,a.latent,lane,n);
+        float4 u=muse_iq2_batch_select(up,x0,x1,x2,x3,a.latent,lane,n);
+        if(lane==0) {
+#pragma unroll
+            for(uint r=0;r<4;r++) if(r<n)
+                mid[size_t(uint(pair[r]))*a.ff+row]=g[r]/(1.f+exp(-g[r]))*u[r];
+        }
+    }
+}
+
+kernel void kernel_muse_expert_down_iq2_batch(constant muse_expert_batch_args &b,
+    device const uint64_t *downs,device const float *mid,device float *part,
+    device const int *lists,device const int *counts,
+    uint3 group [[threadgroup_position_in_grid]],ushort lane [[thread_index_in_simdgroup]],
+    ushort simd [[simdgroup_index_in_threadgroup]],uint3 threads [[threads_per_threadgroup]]) {
+    constant muse_expert_args &a=b.base;
+    uint row=group.x*threads.y+simd,expert=b.experts[group.y],count=uint(counts[expert]);
+    uint first=group.z*4;
+    if(first>=count || row>=a.latent) return;
+    device const char *down=reinterpret_cast<device const char *>(downs[expert])+size_t(row)*a.down_row;
+    for(;first<count;first+=b.tiles*4) {
+        uint n=min(4u,count-first);int pair[4];
+#pragma unroll
+        for(uint r=0;r<4;r++) pair[r]=lists[size_t(expert)*b.list_cap+first+(r<n?r:0)];
+        float4 v=muse_iq2_batch_select(down,mid+size_t(uint(pair[0]))*a.ff,
+            mid+size_t(uint(pair[1]))*a.ff,mid+size_t(uint(pair[2]))*a.ff,
+            mid+size_t(uint(pair[3]))*a.ff,a.ff,lane,n);
+        if(lane==0) {
+#pragma unroll
+            for(uint r=0;r<4;r++) if(r<n) part[size_t(uint(pair[r]))*a.latent+row]=v[r];
+        }
+    }
+}

@@ -1,9 +1,80 @@
 /* Packed IQ2_XXS parity at the complete expert boundary, including post-expert
- * gain-before-RMS and cache eviction. All weights are synthetic (< 1 MiB). */
+ * gain-before-RMS and cache eviction. Normal fixtures use <1 MiB of synthetic
+ * weights; the optional expert benchmark uses eight 4096-wide experts. */
 #include "../ds4.c"
 #include <assert.h>
 
 typedef struct {uint16_t d;int8_t qs[32];} muse_test_q8_0;
+
+/* The logical cache permits a whole 512-token batch, but only eight synthetic
+ * expert triplets are instantiated. Warm both variants; compare every raw
+ * intermediate bit and independently check selected rows with the CPU decoder. */
+static int bench_experts(double minimum_speedup,const char *rollback,bool decode_only) {
+    enum {D=4096,F=4096,E=8,S=8,TMAX=512,ROW=D/256*66,BANK=E*F*ROW,SIZE=3*BANK};
+    FILE *file=tmpfile();assert(file&&!ftruncate(fileno(file),SIZE));
+    unsigned char *map=mmap(NULL,SIZE,PROT_READ|PROT_WRITE,MAP_SHARED,fileno(file),0);
+    assert(map!=MAP_FAILED);uint32_t seed=981;
+    for(unsigned i=0;i<SIZE;i++) {seed=seed*1664525u+1013904223u;map[i]=seed>>24;}
+    for(unsigned i=0;i<SIZE/66;i++) {uint16_t d=0x1800+i%16;memcpy(map+i*66,&d,2);}
+    assert(!msync(map,SIZE,MS_SYNC));
+    size_t max_values=(size_t)TMAX*S*D;
+    float *input=xmalloc((size_t)TMAX*D*4),*reference_mid=xmalloc(max_values*4),*reference_part=xmalloc(max_values*4),*actual=xmalloc(max_values*4);
+    int32_t *ids=xmalloc((size_t)TMAX*S*4);
+    for(unsigned i=0;i<TMAX*D;i++) input[i]=sinf(i*.031f)*.17f;
+    for(unsigned t=0;t<TMAX;t++) for(unsigned s=0;s<S;s++) ids[t*S+s]=(t*3+s)%E;
+    assert(ds4_gpu_init());ds4_gpu_set_ssd_streaming(true);
+    assert(ds4_gpu_set_model_map(map,SIZE)&&ds4_gpu_set_model_fd(fileno(file)));
+    ds4_gpu_set_streaming_expert_cache_budget(TMAX*S);
+    ds4_gpu_set_streaming_expert_cache_expert_bytes(3ull*F*ROW);
+    ds4_gpu_tensor *x=ds4_gpu_tensor_alloc((size_t)TMAX*D*4),*selected=ds4_gpu_tensor_alloc((size_t)TMAX*S*4);
+    ds4_gpu_tensor *mid=ds4_gpu_tensor_alloc(max_values*4),*part=ds4_gpu_tensor_alloc(max_values*4);
+    ds4_gpu_tensor *lists=ds4_gpu_tensor_alloc((uint64_t)E*TMAX*S*4),*counts=ds4_gpu_tensor_alloc(E*4);
+    assert(lists&&counts);
+    assert(x&&selected&&mid&&part&&ds4_gpu_tensor_write(x,0,input,(size_t)TMAX*D*4)&&ds4_gpu_tensor_write(selected,0,ids,(size_t)TMAX*S*4));
+    assert(!setenv(rollback,"1",1));
+    for(unsigned warm=0;warm<3;warm++) {
+        assert(ds4_gpu_begin_commands());
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,TMAX,E,S,D,F,0,lists,counts));
+        assert(ds4_gpu_end_commands());
+    }
+    const unsigned shapes[]={1,2,3,5,16,512};int rc=0;
+    for(unsigned shape=0;shape<sizeof(shapes)/sizeof(shapes[0]);shape++) {
+        unsigned rows=shapes[shape];if(decode_only&&rows!=1) continue;
+        unsigned reps=rows==512?1:8;size_t bytes=(size_t)rows*S*D*4;double elapsed[2]={0};
+        assert(!setenv(rollback,"1",1)&&ds4_gpu_begin_commands());
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts));
+        assert(ds4_gpu_end_commands()&&ds4_gpu_tensor_read(mid,0,reference_mid,bytes)&&ds4_gpu_tensor_read(part,0,reference_part,bytes));
+        for(unsigned s=0;s<S;s++) for(unsigned edge=0;edge<2;edge++) {
+            unsigned row=edge?D-1:0,expert=ids[s];
+            const block_iq2_xxs *gate=(const block_iq2_xxs *)(map+(expert*F+row)*ROW);
+            const block_iq2_xxs *up=(const block_iq2_xxs *)(map+BANK+(expert*F+row)*ROW);
+            const block_iq2_xxs *down=(const block_iq2_xxs *)(map+2*BANK+(expert*D+row)*ROW);
+            float g=ds4_vec_dot_iq2_xxs_f32(D,gate,input),u=ds4_vec_dot_iq2_xxs_f32(D,up,input);
+            float expected=g/(1.f+expf(-g))*u;
+            assert(fabsf(reference_mid[s*F+row]-expected)<1e-4f+fabsf(expected)*1e-5f);
+            expected=ds4_vec_dot_iq2_xxs_f32(F,down,reference_mid+s*F);
+            assert(fabsf(reference_part[s*D+row]-expected)<1e-4f+fabsf(expected)*1e-5f);
+        }
+        for(unsigned round=0;round<6;round++) for(unsigned order=0;order<2;order++) {
+            unsigned variant=(round+order)&1;
+            assert(!(variant?unsetenv(rollback):setenv(rollback,"1",1)));
+            assert(ds4_gpu_begin_commands()&&ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts)&&ds4_gpu_end_commands());
+            double start=now_sec();assert(ds4_gpu_begin_commands());
+            for(unsigned rep=0;rep<reps;rep++) assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts));
+            assert(ds4_gpu_end_commands());elapsed[variant]+=now_sec()-start;
+            assert(ds4_gpu_tensor_read(mid,0,actual,bytes));
+            if(memcmp(reference_mid,actual,bytes)) {fprintf(stderr,"IQ2 mid drift rows=%u variant=%u\n",rows,variant);rc=1;goto done;}
+            assert(ds4_gpu_tensor_read(part,0,actual,bytes));
+            if(memcmp(reference_part,actual,bytes)) {fprintf(stderr,"IQ2 down drift rows=%u variant=%u\n",rows,variant);rc=1;goto done;}
+        }
+        double speedup=elapsed[0]/elapsed[1];
+        printf("IQ2_XXS D=%u F=%u experts=%u rows=%u control_ms=%.3f candidate_ms=%.3f speedup=%.4f exact=yes\n",D,F,E,rows,elapsed[0]*1000/(6*reps),elapsed[1]*1000/(6*reps),speedup);fflush(stdout);
+        if(((rows>1||decode_only)&&speedup<minimum_speedup)||(rows==1&&speedup<.97)) rc=1;
+    }
+done:
+    unsetenv(rollback);ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(selected);ds4_gpu_tensor_free(mid);ds4_gpu_tensor_free(part);ds4_gpu_tensor_free(lists);ds4_gpu_tensor_free(counts);
+    ds4_gpu_cleanup();munmap(map,SIZE);fclose(file);free(input);free(ids);free(reference_mid);free(reference_part);free(actual);return rc;
+}
 
 static void test_q8_linears(void) {
     enum {KMAX=8192,NMAX=64,TMAX=32,PAD=16};
@@ -53,7 +124,17 @@ static void test_q8_linears(void) {
     ds4_gpu_cleanup();munmap(map,bytes);free(input);free(actual);
 }
 
-int main(void) {
+int main(int argc,char **argv) {
+    if(argc>1) {
+        char *end=NULL;double minimum=argc>=3?strtod(argv[2],&end):0;
+        bool decode_only=!strcmp(argv[1],"--bench-experts-decode");
+        if(argc>4||(!decode_only&&strcmp(argv[1],"--bench-experts"))||!isfinite(minimum)||minimum<0||
+           (argc>=3&&(!argv[2][0]||*end)) ||
+           (argc==4&&(!argv[3][0]||strchr(argv[3],'=')))) {
+            fprintf(stderr,"usage: %s [--bench-experts|--bench-experts-decode [MIN_SPEEDUP [REFERENCE_ENV]]]\n",argv[0]);return 2;
+        }
+        return bench_experts(minimum,argc==4?argv[3]:decode_only?"DS4_METAL_MUSE_IQ2_REFERENCE":"DS4_METAL_MUSE_EXPERT_BATCH_REFERENCE",decode_only);
+    }
     enum {D=256,F=256,E=4,S=2,T=5,ROW=66,BANK=E*F*ROW,SIZE=3*BANK+D*4};
     FILE *file=tmpfile();assert(file && !ftruncate(fileno(file),SIZE));
     unsigned char *map=mmap(NULL,SIZE,PROT_READ|PROT_WRITE,MAP_SHARED,fileno(file),0);
@@ -66,7 +147,7 @@ int main(void) {
     for(unsigned i=0;i<D;i++) gain[i]=.7f+i/512.f;
     assert(!msync(map,SIZE,MS_SYNC));
     float input[T*D],prob[T*S]={.2f,.8f,.3f,.7f,.4f,.6f,.25f,.75f,.9f,.1f};
-    int32_t ids[T*S]={0,1,1,2,0,3,3,0,2,1};
+    int32_t ids[T*S]={0,1,1,1,0,3,3,0,2,1};
     for(unsigned i=0;i<T*D;i++) input[i]=((int)(i%23)-11)*.03125f;
     double expected[T*D];memset(expected,0,sizeof(expected));
     for(unsigned t=0;t<T;t++) for(unsigned s=0;s<S;s++) {
@@ -86,12 +167,15 @@ int main(void) {
     assert(ds4_gpu_init() && ds4_gpu_set_model_map(map,SIZE) && ds4_gpu_set_model_fd(fileno(file)));
     ds4_gpu_tensor *x=ds4_gpu_tensor_alloc(sizeof(input)),*selected=ds4_gpu_tensor_alloc(sizeof(ids));
     ds4_gpu_tensor *mid=ds4_gpu_tensor_alloc(T*S*F*4),*part=ds4_gpu_tensor_alloc(T*S*D*4);
+    ds4_gpu_tensor *lists=ds4_gpu_tensor_alloc(E*T*S*4),*counts=ds4_gpu_tensor_alloc(E*4);
+    assert(lists&&counts);
     ds4_gpu_tensor *weights=ds4_gpu_tensor_alloc(sizeof(prob)),*out=ds4_gpu_tensor_alloc(T*D*4);
     assert(x&&selected&&mid&&part&&weights&&out);
     assert(ds4_gpu_tensor_write(x,0,input,sizeof(input)) && ds4_gpu_tensor_write(selected,0,ids,sizeof(ids)));
     assert(ds4_gpu_tensor_write(weights,0,prob,sizeof(prob)));
-    for(unsigned streamed=0;streamed<2;streamed++) {
-        ds4_gpu_set_ssd_streaming(streamed);ds4_gpu_set_streaming_expert_cache_budget(S);
+    for(unsigned streamed=0;streamed<3;streamed++) {
+        uint32_t budget=streamed==2?E:S;
+        ds4_gpu_set_ssd_streaming(streamed!=0);ds4_gpu_set_streaming_expert_cache_budget(budget);
         ds4_gpu_set_streaming_expert_cache_expert_bytes(3*F*ROW);
         assert(ds4_gpu_begin_commands());
         if(streamed) {
@@ -100,16 +184,16 @@ int main(void) {
                 .gate_expert_bytes=F*ROW,.down_expert_bytes=D*ROW};
             assert(ds4_gpu_muse_prefetch_experts_tensor(&table,selected,S,0));
         }
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,T,E,S,D,F,0));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,T,E,S,D,F,0,lists,counts));
         assert(ds4_gpu_muse_input_norm_tensor(part,part,map,SIZE,3*BANK,T*S,D,1e-8f));
         assert(ds4_gpu_qwen4_moe_reduce_tensor(out,part,weights,NULL,NULL,NULL,NULL,T,S,S,D,0));
         assert(ds4_gpu_end_commands());float actual[T*D];
         assert(ds4_gpu_tensor_read(out,0,actual,sizeof(actual)));double worst=0;
         for(unsigned i=0;i<T*D;i++) {double error=fabs(actual[i]-expected[i]);worst=MAX(worst,error);assert(error<3e-5);}
-        if(streamed) assert(ds4_gpu_stream_expert_cache_current_count()<=S);
+        if(streamed) assert(ds4_gpu_stream_expert_cache_current_count()<=budget);
         printf("Muse IQ2_XXS %s expert parity: max error %.8g PASS\n",streamed?"SSD":"resident",worst);
     }
     ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(selected);ds4_gpu_tensor_free(mid);
-    ds4_gpu_tensor_free(part);ds4_gpu_tensor_free(weights);ds4_gpu_tensor_free(out);
+    ds4_gpu_tensor_free(part);ds4_gpu_tensor_free(lists);ds4_gpu_tensor_free(counts);ds4_gpu_tensor_free(weights);ds4_gpu_tensor_free(out);
     ds4_gpu_cleanup();munmap(map,SIZE);fclose(file);test_q8_linears();return 0;
 }

@@ -717,3 +717,35 @@ context allocation 4096, and shared auto-admitted expert cache 59.80 GiB.
 These are component and short-prefix observations; the sustained 8K target
 still needs further optimization. Wider unrolls and eight-input tiles were
 measured and rejected in favor of this layout.
+
+
+IQ2_XXS experts now share packed weight decoding across up to four inputs.
+The existing per-expert pair-list builder groups token/slot pairs; each input
+keeps its original serial FP32 dot, SIMD reduction, and output slot. The active
+expert addresses and buffer lifetime remain owned by the bounded SSD cache.
+Output SIMD groups pack up to eight rows within the pipeline limit, while
+independent input tiles avoid long serial loops for popular experts. The graph
+reserves 4 MiB of pair lists plus 1 KiB of counts at a 512-token chunk, included
+in admission and runtime accounting. Single-token expert execution is unchanged.
+
+```sh
+make tests/test_muse_quant
+./tests/test_muse_quant --bench-experts
+```
+
+The bounded 4096-wide expert comparison measured 1.20x/1.49x/1.50x/1.75x/1.54x
+at 2/3/5/16/512 inputs, with every intermediate output bit unchanged. One input
+measured 1.00x. Fixtures cover duplicate selected IDs, rotated slot ranks, tails,
+small-cache splitting, and exact full-graph results between streaming cache
+budgets at the same chunk size. The existing resident F32 path uses a different
+dot kernel and retains its independent numerical-reference check.
+
+A full-checkpoint ABBA+BAAB comparison of eight fresh 512-token prompts measured
+12.28 prefill tokens/s with grouped experts versus 9.88 with the prior kernel,
+about 24% faster. All 1,616,384 frontier logits matched bit-for-bit. Context
+allocation was 4096, chunk size 512, and the shared auto-admitted cache 60.21 GiB.
+An earlier four-pass comparison measured 10.24 versus 11.85 and did not confirm
+a gain; its grouped pass timings ranged from 28.74 to 71.27 seconds. Both runs
+are retained in the validation artifacts. Hardware variation makes a single
+pass unreliable. These are prefill results, not evidence of reaching the
+10 tokens/s sustained decode target.

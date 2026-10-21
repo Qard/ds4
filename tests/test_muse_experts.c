@@ -72,7 +72,7 @@ int main(void) {
             assert(ds4_gpu_tensor_write(selected,0,ids,sizeof(ids)));
             assert(ds4_gpu_muse_input_norm_tensor(mid,x,map,SIZE,3*BANK,T,D,1e-8f));
         }
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,T,E,S,D,F,0));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,T,E,S,D,F,0,NULL,NULL));
         assert(ds4_gpu_muse_input_norm_tensor(part,part,map,SIZE,3*BANK,T*S,D,1e-8f));
         assert(ds4_gpu_qwen4_moe_reduce_tensor(out,part,w,NULL,NULL,NULL,NULL,T,S,S,D,0));
         assert(ds4_gpu_end_commands());
@@ -84,7 +84,7 @@ int main(void) {
     /* The shared frequency cache ages once per decoded token, independently
      * of routed layer count. Batched prefill above must not advance it. */
     for(unsigned token=0;token<19;token++) for(unsigned layer=0;layer<2;layer++) {
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,layer));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,layer,NULL,NULL));
         assert(ds4_gpu_synchronize());
         assert(ds4_gpu_stream_expert_cache_current_count()<=S);
     }
@@ -111,11 +111,11 @@ int main(void) {
         assert(ds4_gpu_signal_selected_readback_ready(&event)&&event);
         assert(ds4_gpu_muse_input_norm_tensor(mid,x,map,SIZE,3*BANK,T,D,1e-8f));
         assert(ds4_gpu_muse_prefetch_experts_tensor(&event_table,selected,S,event));
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,0));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,0,NULL,NULL));
         assert(ds4_gpu_end_commands()&&ds4_gpu_muse_prefetch_finish());
         float event_output[S*D],control[S*D];
         assert(ds4_gpu_tensor_read(part,0,event_output,sizeof(event_output)));
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,0));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,0,NULL,NULL));
         assert(ds4_gpu_synchronize()&&ds4_gpu_tensor_read(part,0,control,sizeof(control)));
         assert(!memcmp(event_output,control,sizeof(control))&&ds4_gpu_stream_expert_cache_current_count()<=S);
     }

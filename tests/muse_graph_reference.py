@@ -158,10 +158,16 @@ if __name__=='__main__':
         model=Path(tmp)/'tiny.gguf'; output=Path(tmp)/'logits.f32'
         for packed in (False,True):
             expected=reference(checkpoint(model,packed=packed))
-            for streamed in (0,1):
+            baseline={}
+            for streamed in (0,1,2):
                 for chunk in (1,3,10):
                     subprocess.run([sys.argv[1],str(model),str(output),str(streamed),str(chunk),str(int(packed))],check=True)
                     actual=np.fromfile(output,dtype='<f4').reshape(10,32)
+                    # Resident F32 uses a different existing dot kernel. Compare
+                    # exact bits between streaming budgets at the same chunk.
+                    key=(bool(streamed),chunk)
+                    if key not in baseline: baseline[key]=actual.copy()
+                    assert np.array_equal(actual,baseline[key]),(packed,streamed,chunk,'streaming budget changed output bits')
                     error=np.max(np.abs(actual-expected))
                     assert error<5e-5,(packed,streamed,chunk,error)
                     assert np.array_equal(actual.argmax(axis=-1),expected.argmax(axis=-1))

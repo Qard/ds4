@@ -9,6 +9,7 @@
     X(attn_part,ds4_gpu_muse_attention_scratch_bytes(T,DS4_N_HEAD,DS4_N_HEAD_DIM)/4) \
     X(latent,T*DS4_N_MOE_LATENT) X(router,T*DS4_N_EXPERT) X(probs,T*DS4_N_EXPERT) \
     X(selected,T*DS4_N_EXPERT_USED) X(weights,T*DS4_N_EXPERT_USED) \
+    X(moe_lists,T*DS4_N_EXPERT_USED*DS4_N_EXPERT) X(moe_counts,DS4_N_EXPERT) \
     X(mid,T*DS4_N_EXPERT_USED*DS4_N_FF_EXP) X(part,T*DS4_N_EXPERT_USED*DS4_N_MOE_LATENT) \
     X(moe,T*DS4_N_MOE_LATENT) X(logits,T*DS4_N_VOCAB)
 
@@ -148,7 +149,7 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
             ds4_gpu_muse_experts_tensor(g->mid,g->part,g->latent,g->selected,m->map,m->size,
                 l->ffn_gate_exps->abs_offset,l->ffn_up_exps->abs_offset,l->ffn_down_exps->abs_offset,
                 l->ffn_gate_exps->type,l->ffn_down_exps->type,T,DS4_N_EXPERT,DS4_N_EXPERT_USED,
-                DS4_N_MOE_LATENT,DS4_N_FF_EXP,il) &&
+                DS4_N_MOE_LATENT,DS4_N_FF_EXP,il,g->moe_lists,g->moe_counts) &&
             ds4_gpu_muse_input_norm_tensor(g->part,g->part,m->map,m->size,l->ffn_post_exp_norm->abs_offset,
                 T*DS4_N_EXPERT_USED,DS4_N_MOE_LATENT,g_ds4_shape.post_norm_eps) &&
             ds4_gpu_qwen4_moe_reduce_tensor(g->moe,g->part,g->weights,NULL,NULL,NULL,NULL,
