@@ -52,6 +52,13 @@ loads its snapshot into the second. Both sessions still start with the same
 control prefill. The temporary host snapshot is freed before timed decode;
 allow enough memory for it during setup. The default prefills both sessions.
 
+Use `--save-prefix PATH` to retain the first control prefill in ds4's existing
+session payload format; an existing file is never overwritten. `--load-prefix PATH` restores both sessions from that payload and requires an exact token
+match with `--prompt-file` and `--prefix-tokens`. Keep the checkpoint and session
+allocation compatible. This isolates decode experiments from repeated long
+prefills; it does not validate a changed prefill implementation. Setup progress
+uses the normal session callback, which is cleared before timed decode.
+
 To compare the default pre-M5 ratio-4 compressor pack/transpose fusion with the
 legacy decode path, including token selection, use:
 

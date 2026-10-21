@@ -31,6 +31,8 @@ typedef struct {
     const char *candidate_env;
     const char *candidate_value;
     const char *control_value;
+    const char *save_prefix;
+    const char *load_prefix;
     int prefix_tokens;
     int ctx;
     int warmup;
@@ -59,6 +61,8 @@ static void usage(FILE *fp, const char *argv0) {
             "  --control-value VALUE  control environment value (default: unset)\n"
             "  --candidate-value VALUE candidate environment value (default: 1)\n"
             "  --clone-prefix         snapshot the first prefill into the second session\n"
+            "  --save-prefix PATH     save the control prefill payload (exclusive create)\n"
+            "  --load-prefix PATH     restore both sessions from a matching prefix payload\n"
             "  --include-selection    include one non-EOS argmax in each timed step\n",
             argv0);
 }
@@ -124,6 +128,10 @@ static bench_config parse_options(int argc, char **argv) {
             cfg.include_selection = true;
         } else if (!strcmp(arg, "--clone-prefix")) {
             cfg.clone_prefix = true;
+        } else if (!strcmp(arg, "--save-prefix")) {
+            cfg.save_prefix = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--load-prefix")) {
+            cfg.load_prefix = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--prefix-tokens")) {
             cfg.prefix_tokens =
                 parse_int_arg(need_arg(&i, argc, argv, arg), arg, 1);
@@ -188,6 +196,41 @@ static double now_sec(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1.0e9;
+}
+
+static int prefix_file(ds4_session *session,const ds4_tokens *prefix,
+                       const char *path,bool save,char *err,size_t errlen) {
+    FILE *fp=fopen(path,save?"wbx":"rb");
+    if(!fp) {
+        snprintf(err,errlen,"cannot %s prefix %s: %s",save?"create":"open",path,strerror(errno));
+        return 1;
+    }
+    int rc=1;
+    if(save) rc=ds4_session_save_payload(session,fp,err,errlen);
+    else {
+        long bytes=-1;
+        if(fseek(fp,0,SEEK_END)==0) bytes=ftell(fp);
+        if(bytes<=0||fseek(fp,0,SEEK_SET)!=0)
+            snprintf(err,errlen,"cannot measure nonempty prefix payload %s",path);
+        else rc=ds4_session_load_payload(session,fp,(uint64_t)bytes,err,errlen);
+    }
+    if(fclose(fp)!=0&&rc==0) {
+        snprintf(err,errlen,"cannot close prefix %s: %s",path,strerror(errno));rc=1;
+    }
+    if(save&&rc) remove(path); /* Only the file exclusively created above. */
+    if(!rc&&!save) {
+        const ds4_tokens *loaded=ds4_session_tokens(session);
+        if(!loaded||loaded->len!=prefix->len||
+           memcmp(loaded->v,prefix->v,(size_t)prefix->len*sizeof(*prefix->v))) {
+            snprintf(err,errlen,"prefix payload tokens do not match --prompt-file/--prefix-tokens");rc=1;
+        }
+    }
+    return rc;
+}
+
+static void prefix_progress(void *ud,const char *event,int current,int total) {
+    fprintf(stderr,"metal-decode-schedule-bench: prefix session=%ld %s %d/%d\n",
+            (long)(intptr_t)ud,event,current,total);
 }
 
 static char *read_text(const char *path) {
@@ -436,8 +479,14 @@ int main(int argc, char **argv) {
         .cap = cfg.prefix_tokens,
     };
     for (int i = 0; i < VARIANT_COUNT; i++) {
-        if (ds4_session_create(&sessions[i], engine, cfg.ctx) != 0 ||
-            (cfg.clone_prefix && i > 0
+        if(ds4_session_create(&sessions[i],engine,cfg.ctx)!=0) {
+            fprintf(stderr,"metal-decode-schedule-bench: session %d allocation failed\n",i);
+            goto done;
+        }
+        ds4_session_set_progress(sessions[i],prefix_progress,(void *)(intptr_t)i);
+        if ((cfg.load_prefix
+                ? prefix_file(sessions[i],&prefix,cfg.load_prefix,false,err,sizeof(err))
+                : cfg.clone_prefix && i > 0
                 ? ds4_session_load_snapshot(sessions[i], &prefix_snapshot, err, sizeof(err))
                 : ds4_session_sync(sessions[i], &prefix, err, sizeof(err))) != 0) {
             fprintf(stderr,
@@ -446,9 +495,13 @@ int main(int argc, char **argv) {
                     err[0] ? err : "unknown error");
             goto done;
         }
+        ds4_session_set_progress(sessions[i],NULL,NULL);
+        if(i==0&&cfg.save_prefix&&prefix_file(sessions[i],&prefix,cfg.save_prefix,true,err,sizeof(err))) {
+            fprintf(stderr,"metal-decode-schedule-bench: prefix save failed: %s\n",err);goto done;
+        }
         /* Decode comparisons use the same control prefill. Copying its full
          * state avoids repeating a long SSD prefill; the snapshot is temporary. */
-        if (cfg.clone_prefix && i == 0 &&
+        if (cfg.clone_prefix && !cfg.load_prefix && i == 0 &&
             ds4_session_save_snapshot(sessions[i], &prefix_snapshot, err, sizeof(err)) != 0) {
             fprintf(stderr,"metal-decode-schedule-bench: prefix snapshot failed: %s\n",err);
             goto done;

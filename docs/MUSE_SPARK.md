@@ -674,3 +674,21 @@ versus 7.27 tokens/s, with all 26,872,384 logits and 132 selected IDs exact.
 Both runs used four warmup steps, two sessions sharing one engine/cache, and
 `--clone-prefix` in the native decode A/B harness. These observations establish
 the scheduling gain at short prefixes; they are not sustained 8K results.
+
+
+The long-context schedule A/B on `2030616` used an 8192-token prefix,
+8325-token allocation, four warmup steps, and 128 measured tokens per variant.
+It passed all 26,872,384 raw logits and 132 selected IDs exactly, measuring
+4.257 versus 4.198 tokens/s. Its auto-admitted shared expert cache was
+59.04 GiB; its 61 memory samples peaked at 79.45 GiB RSS, with 36 additional
+16-KiB system Swapouts pages. This shared-cache A/B is not a standalone
+throughput comparison with the fixed-cache sweep. Reported GPU frequency
+varied from 447 to 692 MHz across the timed loop; that observation does not
+establish a thermal or power-limit cause. The connected adapter reports 100 W.
+
+A restored 16-token prefix with four warmups measured 7.57 versus 7.73 tokens/s;
+with 32 warmups and 256 measured tokens it measured 8.15 versus 7.66 tokens/s,
+with all 58,391,872 logits and 288 selected IDs exact. Scheduling gains depend
+on context and cache state; the standalone sustained target remains unmet.
+Skipping an additional latent wait preserved correctness but gave only about
+1% in its short comparison, so that extra path was removed.
