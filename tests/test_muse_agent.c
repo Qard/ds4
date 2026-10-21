@@ -112,6 +112,24 @@ static void test_compaction_progress(void) {
     AGENT_TEST_ASSERT(strstr(text,"COMPACTING summary 12 tokens")!=NULL);
 }
 
+static void test_compaction_summary_prefix(agent_worker *w) {
+    ds4_tokens tokens={0};
+    ds4_chat_append_message(w->engine,&tokens,"user","Summarize task state.");
+    agent_compact_append_summary_prefix(w->engine,&tokens);
+    ds4_chat_decode_state decode;
+    AGENT_TEST_ASSERT(ds4_chat_decode_prefix(w->engine,&decode,&tokens)==0);
+    AGENT_TEST_ASSERT(decode.body && decode.final_answer && !decode.reasoning);
+    ds4_tokens body={0};ds4_tokenize_text(w->engine,"Durable task state.",&body);
+    agent_buf visible={0};
+    for(int i=0;i<body.len;i++) {
+        size_t n=0;char *text=ds4_chat_decode_token(w->engine,&decode,body.v[i],&n);
+        AGENT_TEST_ASSERT(text!=NULL);
+        if(text) {agent_buf_append(&visible,text,n);free(text);}
+    }
+    AGENT_TEST_ASSERT(visible.ptr && !strcmp(visible.ptr,"Durable task state."));
+    free(visible.ptr);ds4_tokens_free(&body);ds4_tokens_free(&tokens);
+}
+
 static void test_resume_prefix(agent_worker *w) {
     const char *headers[] = {"<|start|>assistant to=self<|message|>",
         "<|start|>assistant to=commentary<|message|>",
@@ -161,6 +179,7 @@ int main(int argc, char **argv) {
     test_history(&w);
     test_tail_boundary(&w);
     test_compaction_progress();
+    test_compaction_summary_prefix(&w);
     test_resume_prefix(&w);
     free(w.out);
     ds4_engine_close(w.engine);pthread_mutex_destroy(&w.mu);

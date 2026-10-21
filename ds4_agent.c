@@ -9981,11 +9981,19 @@ static int agent_compact_summary_budget(int ctx) {
     return budget;
 }
 
+static void agent_compact_append_summary_prefix(ds4_engine *engine, ds4_tokens *tokens) {
+    ds4_chat_append_assistant_prefix(engine,tokens,DS4_THINK_NONE);
+    /* Internal summaries have a bounded budget and cannot call tools. Muse's
+     * ordinary prefix leaves recipient selection open, even at NONE effort. */
+    if (ds4_engine_is_muse(engine))
+        ds4_tokenize_rendered_chat(engine," to=user<|message|>",tokens);
+}
+
 static int agent_compact_reserve_tokens(agent_worker *w) {
     char *text = agent_compact_make_prompt("context pressure before continuing the current task");
     ds4_tokens tokens = {0};
     ds4_chat_append_message(w->engine, &tokens, "user", text);
-    ds4_chat_append_assistant_prefix(w->engine, &tokens, DS4_THINK_NONE);
+    agent_compact_append_summary_prefix(w->engine, &tokens);
     int reserve = tokens.len + 64 +
                   agent_compact_summary_budget(agent_worker_effective_ctx_size(w));
     free(text);
@@ -10032,7 +10040,7 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
     ds4_tokens summary_suffix = {0};
     ds4_chat_append_message(w->engine, &summary_suffix, "user", prompt_text);
     free(prompt_text);
-    ds4_chat_append_assistant_prefix(w->engine, &summary_suffix, DS4_THINK_NONE);
+    agent_compact_append_summary_prefix(w->engine, &summary_suffix);
     const int ctx = agent_worker_effective_ctx_size(w);
     int summary_budget = agent_compact_summary_budget(ctx);
     int summary_bottom = bottom;
@@ -10126,7 +10134,12 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
      * conversation.  If anything fails, invalidate live KV so the next turn
      * cannot accidentally continue from the private compaction exchange. */
     agent_buf summary = {0};
-    ds4_chat_decode_state summary_decode;ds4_chat_decode_init(&summary_decode);
+    ds4_chat_decode_state summary_decode;
+    if (ds4_chat_decode_prefix(w->engine,&summary_decode,&prompt)) {
+        snprintf(err,err_len,"invalid compaction summary prefix");
+        ds4_session_invalidate(w->session);ds4_tokens_free(&prompt);ds4_tokens_free(&sys);
+        agent_publish(w,"\x1b[0m\n",5);return false;
+    }
     char eval_err[160] = {0};
     int dsml_id = agent_special_token_id(w->engine, "｜DSML｜");
     double t0 = now_sec();

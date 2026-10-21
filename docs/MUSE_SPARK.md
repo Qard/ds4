@@ -389,3 +389,11 @@ when replies arrive in reverse order. Output-only Responses and Anthropic
 continuations retain owned ID/name bindings at the existing live KV frontier;
 reused IDs in replayed history resolve to the nearest preceding assistant call.
 These rules have checkpoint-free regressions, including both live API styles.
+
+The focused high-reasoning compaction check exposed an empty-summary failure:
+Muse spent all 512 internal tokens outside the public summary body. Internal
+compaction now supplies `assistant to=user` plus its message boundary and seeds
+the existing decoder from that prefix. Both reserve accounting and generation
+use the same prefix helper. Ordinary assistant prefixes remain open for native
+reasoning and tool selection. The prefix/body regression passes; real-checkpoint
+revalidation is pending. The failed run is retained as evidence.
