@@ -940,3 +940,35 @@ tolerances. Focused projection, quantization, complete graph, session, memory,
 long-attention checks and all native builds pass. Cross-run speeds remain
 variable; the paired gains establish modest improvements rather than proving
 the sustained 10 tokens/s target.
+
+
+Single-token Q8 on M5 now selects the existing two-RHS specialization rather
+than evaluating four RHS accumulators with three unused outputs. It retains
+the live row's original FP32 chain and reduction; it adds no shader, weight
+bank or scratch allocation. Batched evaluation and other devices keep their
+previous specialization. `DS4_METAL_MUSE_Q8_RHS_REFERENCE=1` restores the
+four-RHS decode variant.
+
+The bounded comparison improved the tested 4096-by-8192 and 8192-by-4096
+projections by about 32–33%, the 8192-by-1024 projection by 24%, and the
+8192-by-8192 projection by 3.9%, with all output bits exact. The optional
+component test is `./tests/test_muse_quant --bench-q8-decode 1.03`.
+The full saved-8K comparison measured 5.6626 versus 5.3097 tokens/s over
+1024 measured steps per path after 32 warmup steps. Its 6.65% paired gain has
+a within-run 95% block-bootstrap interval of 5.62–7.55%. All 213,564,736 logits
+and 1,056 selected IDs matched exactly. Runtime was 400.88 seconds; 21 samples
+peaked at 78.41 GiB RSS with no increase in system swapouts. Independent
+FP64 Q8 checks, offset views, output guards, rollback comparisons, and exact
+one-row versus batched outputs pass, along with the focused graph, session,
+memory and attention checks and all native builds.
+
+A separate use of the existing full-FP32 matrix primitive was not retained.
+It passed the existing per-operator numerical bound against sampled independent
+FP64 dots and exact one-row versus batch comparisons through 512 rows, but
+its different reduction changes old output bits. It was 2.6–3.8 times faster
+for 512-row projections and 3.5–5.4 times slower for single-token decode.
+Mixing that reduction into prefill alone would also violate the current
+batch-consistency contract. An eight-matrix storage comparison (544 MiB of
+actual fixed weights, both variants locked) measured only about a 2.7%
+anonymous-buffer advantage over file-backed views. That result does not
+justify a model-wide copy or an additional resident weight bank.

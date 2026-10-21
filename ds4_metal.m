@@ -50608,7 +50608,11 @@ static int muse_q8_f32_rows(const muse_bind *b,uint32_t in_dim,uint32_t out_dim,
      * from switching matvec kernels can cross F16 KV/routing boundaries over
      * Muse's 62 layers and make prefix rewinds disagree with fresh prefill.
      * Eight-row tiles reuse packed weights without expanding a weight bank. */
-    const int16_t nsg=ds4_gpu_mv_ext_nsg(),nxpsg=8,r1ptg=4;
+    const int16_t nsg=ds4_gpu_mv_ext_nsg(),nxpsg=8;
+    /* Reuse the two-RHS specialization for decode: one unused RHS instead
+     * of three, with the same FP32 chain for the live output. */
+    const int16_t r1ptg=tokens==1&&ds4_gpu_device_is_m5_apple_silicon()&&
+        !getenv("DS4_METAL_MUSE_Q8_RHS_REFERENCE")?2:4;
     id<MTLComputePipelineState> pipeline=ds4_gpu_get_mul_mv_ext_pipeline(
         ds4_gpu_mv_ext_name(1,r1ptg),nsg,nxpsg);
     if(!pipeline) return 0;
@@ -50625,7 +50629,7 @@ static int muse_q8_f32_rows(const muse_bind *b,uint32_t in_dim,uint32_t out_dim,
         [enc setBuffer:b[1].buf offset:b[1].off+(NSUInteger)first*in_dim*4 atIndex:2];
         [enc setBuffer:b[2].buf offset:b[2].off+(NSUInteger)first*out_dim*4 atIndex:3];
         uint32_t rows_per_group=(32u/nxpsg)*nsg;
-        [enc dispatchThreadgroups:MTLSizeMake((out_dim+rows_per_group-1)/rows_per_group,(rows+3)/4,1)
+        [enc dispatchThreadgroups:MTLSizeMake((out_dim+rows_per_group-1)/rows_per_group,(rows+r1ptg-1)/r1ptg,1)
              threadsPerThreadgroup:MTLSizeMake(32,nsg,1)];
     }
     ds4_gpu_end_compute_encoder(cb,enc);

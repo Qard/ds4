@@ -76,6 +76,42 @@ done:
     ds4_gpu_cleanup();munmap(map,SIZE);fclose(file);free(input);free(ids);free(reference_mid);free(reference_part);free(actual);return rc;
 }
 
+/* Test the existing Q8 RHS specializations on fixed-projection shapes. */
+static int bench_q8_decode(double minimum) {
+    enum {KMAX=8192,NMAX=8192};size_t bytes=(size_t)KMAX*NMAX/32*34;
+    unsigned char *map=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    assert(map!=MAP_FAILED);uint32_t seed=817;
+    for(size_t i=0;i<bytes/34;i++) {
+        muse_test_q8_0 *b=(muse_test_q8_0 *)(map+i*34);b->d=(uint16_t)(0x2155+i%16);
+        for(unsigned j=0;j<32;j++){seed=seed*1664525u+1013904223u;b->qs[j]=(int8_t)(seed>>24);}
+    }
+    float input[KMAX],reference[NMAX],actual[NMAX];
+    for(unsigned i=0;i<KMAX;i++) input[i]=sinf(i*.17f)*.135f+cosf(i*.07f)*.031f;
+    assert(ds4_gpu_init()&&ds4_gpu_set_model_map(map,bytes));
+    ds4_gpu_tensor *x=ds4_gpu_tensor_alloc((uint64_t)KMAX*512*4),*y=ds4_gpu_tensor_alloc((uint64_t)NMAX*512*4);
+    assert(x&&y&&ds4_gpu_tensor_write(x,0,input,sizeof(input)));int rc=0;
+    const unsigned shapes[][2]={{4096,8192},{8192,4096},{8192,1024},{8192,8192}};
+    const char *rollback="DS4_METAL_MUSE_Q8_RHS_REFERENCE";
+    for(unsigned shape=0;shape<4;shape++) {
+        unsigned k=shapes[shape][0],n=shapes[shape][1];double elapsed[2]={0};
+        assert(!setenv(rollback,"1",1));
+        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,8,k,n,x,1)&&ds4_gpu_tensor_read(y,0,reference,n*4));
+        enum {ROUNDS=24,REPS=32};
+        for(unsigned round=0;round<ROUNDS;round++) for(unsigned order=0;order<2;order++) {
+            unsigned v=(round+order)&1;assert(!(v?unsetenv(rollback):setenv(rollback,"1",1)));
+            assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,8,k,n,x,1)&&ds4_gpu_synchronize());
+            double start=now_sec();assert(ds4_gpu_begin_commands());
+            for(unsigned rep=0;rep<REPS;rep++) assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,8,k,n,x,1));
+            assert(ds4_gpu_end_commands());elapsed[v]+=now_sec()-start;
+            assert(ds4_gpu_tensor_read(y,0,actual,n*4)&&!memcmp(reference,actual,n*4));
+        }
+        double ratio=elapsed[0]/elapsed[1];
+        printf("Q8 decode K=%u N=%u control_ms=%.6f candidate_ms=%.6f ratio=%.6f exact=yes\n",k,n,elapsed[0]*1000/(ROUNDS*REPS),elapsed[1]*1000/(ROUNDS*REPS),ratio);fflush(stdout);
+        if(ratio<minimum)rc=1;
+    }
+    unsetenv(rollback);ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(y);ds4_gpu_cleanup();munmap(map,bytes);return rc;
+}
+
 static void test_q8_linears(void) {
     enum {KMAX=8192,NMAX=64,TMAX=32,PAD=16};
     size_t bytes=(size_t)NMAX*(KMAX/32)*34;
@@ -86,6 +122,7 @@ static void test_q8_linears(void) {
         for(unsigned j=0;j<32;j++) {seed=seed*1664525u+1013904223u;b->qs[j]=(int8_t)(seed>>24);}
     }
     float *input=xmalloc((size_t)TMAX*KMAX*4),*actual=xmalloc((TMAX*NMAX+2*PAD)*4);
+    float *reference=xmalloc(TMAX*NMAX*4);
     for(unsigned i=0;i<TMAX*KMAX;i++) input[i]=sinf(i*.17f)*.135f+cosf(i*.07f)*.031f;
     assert(ds4_gpu_init() && ds4_gpu_set_model_map(map,bytes));
     ds4_gpu_tensor *xb=ds4_gpu_tensor_alloc((TMAX*KMAX+2*PAD)*4),*yb=ds4_gpu_tensor_alloc((TMAX*NMAX+2*PAD)*4);
@@ -96,8 +133,13 @@ static void test_q8_linears(void) {
         unsigned k=shape?8192:128,n=shape?64:17,t=rows[ti],stride=k/32*34;
         for(unsigned i=0;i<TMAX*NMAX+2*PAD;i++) actual[i]=123456.f;
         assert(ds4_gpu_tensor_write(yb,0,actual,(TMAX*NMAX+2*PAD)*4));
+        assert(!setenv("DS4_METAL_MUSE_Q8_RHS_REFERENCE","1",1));
         assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,8,k,n,x,t) && ds4_gpu_synchronize());
         assert(ds4_gpu_tensor_read(yb,0,actual,(TMAX*NMAX+2*PAD)*4));
+        memcpy(reference,actual+PAD,t*n*4);
+        assert(!unsetenv("DS4_METAL_MUSE_Q8_RHS_REFERENCE"));
+        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,8,k,n,x,t)&&ds4_gpu_synchronize());
+        assert(ds4_gpu_tensor_read(yb,0,actual,(TMAX*NMAX+2*PAD)*4)&&!memcmp(reference,actual+PAD,t*n*4));
         for(unsigned i=0;i<PAD;i++) assert(actual[i]==123456.f);
         for(unsigned i=PAD+t*n;i<TMAX*NMAX+2*PAD;i++) assert(actual[i]==123456.f);
         for(unsigned row=0;row<t;row++) {
@@ -121,10 +163,15 @@ static void test_q8_linears(void) {
     }
     printf("Muse Q8_0 FP32 linears, irregular rows and offset views: max error %.8g PASS\n",worst);
     ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(y);ds4_gpu_tensor_free(xb);ds4_gpu_tensor_free(yb);
-    ds4_gpu_cleanup();munmap(map,bytes);free(input);free(actual);
+    ds4_gpu_cleanup();munmap(map,bytes);free(input);free(actual);free(reference);
 }
 
 int main(int argc,char **argv) {
+    if(argc>1&&!strcmp(argv[1],"--bench-q8-decode")) {
+        char *end=NULL;double minimum=argc==3?strtod(argv[2],&end):0;
+        if(argc>3||!isfinite(minimum)||minimum<0||(argc==3&&(!argv[2][0]||*end)))return 2;
+        return bench_q8_decode(minimum);
+    }
     if(argc>1) {
         char *end=NULL;double minimum=argc>=3?strtod(argv[2],&end):0;
         bool decode_only=!strcmp(argv[1],"--bench-experts-decode");
