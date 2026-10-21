@@ -34,7 +34,7 @@ static int bench_experts(double minimum_speedup,const char *rollback,bool decode
     assert(!setenv(rollback,"1",1));
     for(unsigned warm=0;warm<3;warm++) {
         assert(ds4_gpu_begin_commands());
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,TMAX,E,S,D,F,0,lists,counts));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,TMAX,E,S,D,F,0,lists,counts,0));
         assert(ds4_gpu_end_commands());
     }
     const unsigned shapes[]={1,2,3,5,16,512};int rc=0;
@@ -42,7 +42,7 @@ static int bench_experts(double minimum_speedup,const char *rollback,bool decode
         unsigned rows=shapes[shape];if(decode_only&&rows!=1) continue;
         unsigned reps=rows==512?1:8;size_t bytes=(size_t)rows*S*D*4;double elapsed[2]={0};
         assert(!setenv(rollback,"1",1)&&ds4_gpu_begin_commands());
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts,0));
         assert(ds4_gpu_end_commands()&&ds4_gpu_tensor_read(mid,0,reference_mid,bytes)&&ds4_gpu_tensor_read(part,0,reference_part,bytes));
         for(unsigned s=0;s<S;s++) for(unsigned edge=0;edge<2;edge++) {
             unsigned row=edge?D-1:0,expert=ids[s];
@@ -58,9 +58,9 @@ static int bench_experts(double minimum_speedup,const char *rollback,bool decode
         for(unsigned round=0;round<6;round++) for(unsigned order=0;order<2;order++) {
             unsigned variant=(round+order)&1;
             assert(!(variant?unsetenv(rollback):setenv(rollback,"1",1)));
-            assert(ds4_gpu_begin_commands()&&ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts)&&ds4_gpu_end_commands());
+            assert(ds4_gpu_begin_commands()&&ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts,0)&&ds4_gpu_end_commands());
             double start=now_sec();assert(ds4_gpu_begin_commands());
-            for(unsigned rep=0;rep<reps;rep++) assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts));
+            for(unsigned rep=0;rep<reps;rep++) assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts,0));
             assert(ds4_gpu_end_commands());elapsed[variant]+=now_sec()-start;
             assert(ds4_gpu_tensor_read(mid,0,actual,bytes));
             if(memcmp(reference_mid,actual,bytes)) {fprintf(stderr,"IQ2 mid drift rows=%u variant=%u\n",rows,variant);rc=1;goto done;}
@@ -231,7 +231,7 @@ int main(int argc,char **argv) {
                 .gate_expert_bytes=F*ROW,.down_expert_bytes=D*ROW};
             assert(ds4_gpu_muse_prefetch_experts_tensor(&table,selected,S,0));
         }
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,T,E,S,D,F,0,lists,counts));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,T,E,S,D,F,0,lists,counts,0));
         assert(ds4_gpu_muse_input_norm_tensor(part,part,map,SIZE,3*BANK,T*S,D,1e-8f));
         assert(ds4_gpu_qwen4_moe_reduce_tensor(out,part,weights,NULL,NULL,NULL,NULL,T,S,S,D,0));
         assert(ds4_gpu_end_commands());float actual[T*D];

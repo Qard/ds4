@@ -109,8 +109,9 @@ static bool muse_attention_projections(ds4_muse_gpu_graph *g,const ds4_model *m,
 }
 
 static bool muse_latent_with_prefetch(ds4_muse_gpu_graph *g,const ds4_model *m,
-        const ds4_layer_weights *l,uint32_t layer,uint32_t tokens) {
+        const ds4_layer_weights *l,uint32_t layer,uint32_t tokens,uint64_t *routing_event) {
     uint64_t event=0;
+    *routing_event=0;
     bool overlap=tokens==1&&!getenv("DS4_METAL_MUSE_LATENT_REFERENCE")&&
         !getenv("DS4_METAL_DISABLE_STREAMING_EXPERT_EARLY_LOAD");
     ds4_gpu_stream_expert_table table=graph_stream_expert_table_make(m,l,layer,
@@ -120,7 +121,9 @@ static bool muse_latent_with_prefetch(ds4_muse_gpu_graph *g,const ds4_model *m,
     } else if(tokens==1&&!ds4_gpu_muse_prefetch_experts_tensor(&table,g->selected,DS4_N_EXPERT_USED,0)) return false;
     if(!muse_gemv(g->latent,m,l->ffn_latent_down,g->xn,tokens)||
        !muse_norm(g->latent,g->latent,m,l->ffn_pre_exp_norm,tokens,DS4_N_MOE_LATENT)) return false;
-    return !overlap||ds4_gpu_muse_prefetch_experts_tensor(&table,g->selected,DS4_N_EXPERT_USED,event);
+    if(overlap&&!ds4_gpu_muse_prefetch_experts_tensor(&table,g->selected,DS4_N_EXPERT_USED,event)) return false;
+    *routing_event=event;
+    return true;
 }
 
 static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_model *m,const ds4_weights *w,
@@ -139,6 +142,7 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
             break;
         }
         const ds4_layer_weights *l=&w->layer[il];
+        uint64_t routing_event=0;
         ok=muse_norm(g->xn,g->r,m,l->attn_norm,T,DS4_N_EMBD) &&
             muse_attention_projections(g,m,l,T) &&
             muse_norm(g->q,g->q,m,l->attn_q_norm,T*DS4_N_HEAD,DS4_N_HEAD_DIM) &&
@@ -157,11 +161,11 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
             muse_gemv(g->router,m,l->ffn_gate_inp,g->xn,T) &&
             ds4_gpu_glm_router_select_batch_tensor(g->selected,g->weights,g->probs,m->map,m->size,
                 l->ffn_exp_probs_b->abs_offset,g->router,DS4_N_EXPERT,DS4_N_EXPERT_USED,DS4_EXPERT_WEIGHT_SCALE,T) &&
-            muse_latent_with_prefetch(g,m,l,il,T) &&
+            muse_latent_with_prefetch(g,m,l,il,T,&routing_event) &&
             ds4_gpu_muse_experts_tensor(g->mid,g->part,g->latent,g->selected,m->map,m->size,
                 l->ffn_gate_exps->abs_offset,l->ffn_up_exps->abs_offset,l->ffn_down_exps->abs_offset,
                 l->ffn_gate_exps->type,l->ffn_down_exps->type,T,DS4_N_EXPERT,DS4_N_EXPERT_USED,
-                DS4_N_MOE_LATENT,DS4_N_FF_EXP,il,g->moe_lists,g->moe_counts) &&
+                DS4_N_MOE_LATENT,DS4_N_FF_EXP,il,g->moe_lists,g->moe_counts,routing_event) &&
             ds4_gpu_muse_input_norm_tensor(g->part,g->part,m->map,m->size,l->ffn_post_exp_norm->abs_offset,
                 T*DS4_N_EXPERT_USED,DS4_N_MOE_LATENT,g_ds4_shape.post_norm_eps) &&
             ds4_gpu_qwen4_moe_reduce_tensor(g->moe,g->part,g->weights,NULL,NULL,NULL,NULL,

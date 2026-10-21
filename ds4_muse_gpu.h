@@ -45,11 +45,15 @@ int ds4_gpu_muse_logits_tensor(ds4_gpu_tensor *logits, uint32_t n, float scale, 
 int ds4_gpu_muse_prefetch_experts_tensor(const ds4_gpu_stream_expert_table *table,
     const ds4_gpu_tensor *selected,uint32_t n_selected,uint64_t routing_event);
 int ds4_gpu_muse_prefetch_finish(void);
+/* routing_event is zero unless this selection has been read back through
+ * prefetch_experts_tensor. A current completed event permits CPU address
+ * preparation while the tracked latent producer remains in flight. */
 int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     const ds4_gpu_tensor *x, const ds4_gpu_tensor *selected,
     const void *map, uint64_t size, uint64_t gate_offset, uint64_t up_offset,
     uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
     uint32_t tokens, uint32_t total, uint32_t slots, uint32_t latent,
-    uint32_t ff, uint32_t layer,ds4_gpu_tensor *lists,ds4_gpu_tensor *counts);
+    uint32_t ff, uint32_t layer,ds4_gpu_tensor *lists,ds4_gpu_tensor *counts,
+    uint64_t routing_event);
 
 #endif

@@ -1056,3 +1056,28 @@ different starting hardware state and non-randomized run order limit causal
 attribution to power mode alone. Together with the opposite saved-state
 result, this is evidence of workload-dependent behavior, not a uniform
 power-mode speedup. Neither sustained sweep reaches the 10 tokens/s target.
+
+The single-token expert path now retains an empty command batch after a
+completed routing readback instead of submitting it and blocking the CPU on
+the independent latent producer. The private call carries that routing event
+explicitly; missing, future, stale or uncompleted events and batches with
+queued work retain the original drain. Cache reuse still uses the shared
+in-flight fences, and tracked latent-buffer dependencies order the consumer
+on the existing queue. No new queue, thread, weight bank or precision policy
+is added. `DS4_METAL_MUSE_EXPERT_BARRIER_REFERENCE=1` restores the drain.
+
+The alternating saved-8K comparison completed 32 warmup and 1024 measured
+steps per path: 7.1628 versus 7.0952 tokens/s, a modest 0.95% paired gain
+(within-run 95% block-bootstrap interval 0.11–1.80%). All 213,564,736 logits
+and 1056 selected IDs matched exactly. The 320.71-second validation run had
+17 samples peaking at 72.46 GiB RSS and no increase in system swapouts.
+Focused expert, quantization, complete graph, session, memory, projection and
+long-attention checks pass, as do the native builds. These absolute rates
+come from restored state and do not replace the sustained sweep results.
+
+The expert regression also covers a GPU-produced latent input, forced cache
+reuse and all fallback conditions. A separate timeline regression exposed
+that the command buffer reopened by routing readback lacked its own profiling
+attachment. It now records both submissions independently; the regression
+requires two batch records containing the three encoded compute passes.
+Run it with `make test-muse-timeline`. Profiling remains opt-in.

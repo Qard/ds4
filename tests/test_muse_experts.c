@@ -72,7 +72,7 @@ int main(void) {
             assert(ds4_gpu_tensor_write(selected,0,ids,sizeof(ids)));
             assert(ds4_gpu_muse_input_norm_tensor(mid,x,map,SIZE,3*BANK,T,D,1e-8f));
         }
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,T,E,S,D,F,0,NULL,NULL));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,T,E,S,D,F,0,NULL,NULL,0));
         assert(ds4_gpu_muse_input_norm_tensor(part,part,map,SIZE,3*BANK,T*S,D,1e-8f));
         assert(ds4_gpu_qwen4_moe_reduce_tensor(out,part,w,NULL,NULL,NULL,NULL,T,S,S,D,0));
         assert(ds4_gpu_end_commands());
@@ -84,7 +84,7 @@ int main(void) {
     /* The shared frequency cache ages once per decoded token, independently
      * of routed layer count. Batched prefill above must not advance it. */
     for(unsigned token=0;token<19;token++) for(unsigned layer=0;layer<2;layer++) {
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,layer,NULL,NULL));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,layer,NULL,NULL,0));
         assert(ds4_gpu_synchronize());
         assert(ds4_gpu_stream_expert_cache_current_count()<=S);
     }
@@ -102,23 +102,48 @@ int main(void) {
         .layer=0,.n_total_expert=E,.gate_offset=0,.up_offset=BANK,.down_offset=2*BANK,
         .gate_expert_bytes=D*F*4,.down_expert_bytes=D*F*4};
     ds4_gpu_tensor *routing=ds4_gpu_tensor_alloc(sizeof(ids));assert(routing);
-    for(unsigned round=0;round<4;round++) {
-        int32_t picks[S]={(int32_t)(round<2?0:2),(int32_t)(round<2?1:3)};
+    ds4_gpu_tensor *latent_source=ds4_gpu_tensor_alloc(sizeof(input));assert(latent_source);
+    for(unsigned round=0;round<12;round++) {
+        unsigned base=((round/2)%2)*2,mode=round%6;
+        int32_t picks[S]={(int32_t)base,(int32_t)(base+1)};
+        for(unsigned i=0;i<T*D;i++) input[i]=((int)((i+round*3)%17)-8)*.0625f;
+        assert(ds4_gpu_tensor_write(latent_source,0,input,sizeof(input)));
         int32_t invalid[S]={-1,-1};uint64_t event=0;
         assert(ds4_gpu_tensor_write(selected,0,invalid,sizeof(invalid)));
         assert(ds4_gpu_tensor_write(routing,0,picks,sizeof(picks)));
         assert(ds4_gpu_begin_commands()&&ds4_gpu_tensor_copy(selected,0,routing,0,sizeof(picks)));
         assert(ds4_gpu_signal_selected_readback_ready(&event)&&event);
-        assert(ds4_gpu_muse_input_norm_tensor(mid,x,map,SIZE,3*BANK,T,D,1e-8f));
+        assert(ds4_gpu_tensor_copy(x,0,latent_source,0,sizeof(input)));
         assert(ds4_gpu_muse_prefetch_experts_tensor(&event_table,selected,S,event));
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,0,NULL,NULL));
+        if(mode==2) assert(!setenv("DS4_METAL_MUSE_EXPERT_BARRIER_REFERENCE","1",1));
+        if(mode==5) assert(ds4_gpu_muse_input_norm_tensor(mid,x,map,SIZE,3*BANK,T,D,1e-8f));
+        uint64_t ready_event=mode==3?0:mode==4?UINT64_MAX:event;
+        bool expect_drain=mode>=2;
+        /* Routing has been read back, while the latent producer can remain
+         * in flight. Preparing expert addresses must not submit an empty
+         * batch and synchronously drain that independent producer. */
+        FILE *barriers=tmpfile();assert(barriers);fflush(stderr);
+        int diagnostic_fd=dup(STDERR_FILENO);assert(diagnostic_fd>=0);
+        assert(dup2(fileno(barriers),STDERR_FILENO)>=0);
+        assert(!setenv("DS4_METAL_CB_TIMES","1",1));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,0,NULL,NULL,ready_event));
+        assert(!unsetenv("DS4_METAL_MUSE_EXPERT_BARRIER_REFERENCE"));
+        assert(!unsetenv("DS4_METAL_CB_TIMES"));fflush(stderr);
+        assert(dup2(diagnostic_fd,STDERR_FILENO)>=0);close(diagnostic_fd);
+        rewind(barriers);char barrier_text[8192]={0};
+        assert(fread(barrier_text,1,sizeof(barrier_text)-1,barriers)<sizeof(barrier_text)-1);
+        fclose(barriers);
+        bool drained=strstr(barrier_text,"cb 'command batch'")!=NULL;
+        if(drained!=expect_drain) fputs(barrier_text,stderr);
+        assert(drained==expect_drain);
         assert(ds4_gpu_end_commands()&&ds4_gpu_muse_prefetch_finish());
         float event_output[S*D],control[S*D];
         assert(ds4_gpu_tensor_read(part,0,event_output,sizeof(event_output)));
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,0,NULL,NULL));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,0,0,1,E,S,D,F,0,NULL,NULL,0));
         assert(ds4_gpu_synchronize()&&ds4_gpu_tensor_read(part,0,control,sizeof(control)));
         assert(!memcmp(event_output,control,sizeof(control))&&ds4_gpu_stream_expert_cache_current_count()<=S);
     }
+    ds4_gpu_tensor_free(latent_source);
     ds4_gpu_tensor_free(routing);
     ds4_gpu_tensor_free(x); ds4_gpu_tensor_free(selected); ds4_gpu_tensor_free(mid);
     ds4_gpu_tensor_free(part); ds4_gpu_tensor_free(w); ds4_gpu_tensor_free(out);

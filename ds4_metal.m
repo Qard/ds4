@@ -10171,7 +10171,10 @@ int ds4_gpu_commit_and_wait_selected_readback(uint64_t event_value, const char *
 
         g_batch_cb = ds4_gpu_new_command_buffer();
         g_batch_has_work = NO;
-        if (g_batch_cb) ds4_gpu_stream_expert_cache_note_batch_created();
+        if (g_batch_cb) {
+            ds4_gpu_stream_expert_cache_note_batch_created();
+            ds4_gpu_timeline_attach(g_batch_cb);
+        }
         if (!g_batch_cb) {
             (void)ds4_gpu_wait_pending_command_buffers(what);
             [g_transient_buffers removeAllObjects];
@@ -50860,7 +50863,8 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     const void *map, uint64_t size, uint64_t gate_offset, uint64_t up_offset,
     uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
     uint32_t tokens, uint32_t total, uint32_t slots, uint32_t latent,
-    uint32_t ff, uint32_t layer,ds4_gpu_tensor *lists,ds4_gpu_tensor *counts) {
+    uint32_t ff, uint32_t layer,ds4_gpu_tensor *lists,ds4_gpu_tensor *counts,
+    uint64_t routing_event) {
     if (!tokens || tokens > 1048576 || !total || total > 384 || !slots ||
         slots > DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED || slots > total ||
         !latent || latent > 8192 || !ff || ff > 16384 || layer >= 80) return 0;
@@ -50904,7 +50908,22 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
         };
         bool ok = views[0] && views[1] && views[2] && views[3];
         bool had_batch = g_batch_cb != nil;
-        if (ok && had_batch) ok = ds4_gpu_end_commands();
+        bool keep_batch = false;
+        if (@available(macOS 12.0, *)) {
+            /* The caller has already waited for this routing signal. The
+             * preceding submission may still produce latent activations;
+             * their tracked buffer dependency orders the expert consumer on
+             * this same queue. Keep the fresh empty batch instead of blocking
+             * the CPU on that producer before preparing expert addresses.
+             * Cache eviction retains its independent in-flight fences. */
+            keep_batch = tokens==1 && had_batch && !g_batch_has_work &&
+                routing_event && routing_event==g_selected_readback_event_value &&
+                g_selected_readback_event &&
+                g_selected_readback_event.signaledValue>=routing_event &&
+                !getenv("DS4_METAL_MUSE_EXPERT_BARRIER_REFERENCE");
+        }
+        bool drain_batch = had_batch && !keep_batch;
+        if (ok && drain_batch) ok = ds4_gpu_end_commands();
         if (ok) ok=ds4_gpu_muse_prefetch_finish();
         id<MTLBuffer> ga=nil, ua=nil, da=nil, og=nil, ou=nil, od=nil;
         ds4_gpu_stream_expert_cache_entry *resources[DS4_METAL_STREAM_EXPERT_CACHE_MAX_EXPERT];
@@ -50917,7 +50936,7 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
             g_stream_prefill_batch_selected_addr_building--;
         }
         if (ok) ok = !og && !ou && !od && unique && unique == resource_count;
-        if (ok && had_batch) ok = ds4_gpu_begin_commands();
+        if (ok && drain_batch) ok = ds4_gpu_begin_commands();
         if (ok) {
             muse_expert_args a={rows,slots,latent,ff,gate_type,down_type,gate_row,down_row,total};
             muse_bind b[5]={{ga,0},{ua,0}};
