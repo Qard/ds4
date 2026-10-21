@@ -8,10 +8,10 @@ loading, tokenizer, graph, sessions, KV persistence, CLI, server, evaluation, an
 adapters are implemented. Small independent fixtures exercise numerical
 correctness and the conversation protocol.
 
-**Real-checkpoint startup, full-vocabulary prefill consistency, KV round trips,
-live APIs, an 8K context sweep and the no-reasoning agent compaction/recovery
-suite pass. Final cross-chunk and reasoning-mode validation are in progress.
-This branch is not yet production-ready.**
+**Full-checkpoint numerical comparisons, 8K context tests, live APIs, native
+evaluation, and complete agent compaction/recovery suites in both reasoning
+modes pass on the 128 GiB M5 Max. The final durable-state canary and default-CLI
+smoke checks are in progress.**
 Builds and bounded fixture tests run independently of the downloaded checkpoint.
 
 ## Download
@@ -361,7 +361,7 @@ resumed generation. These cases deliberately submit a large new archive, so most
 source is not already in live KV. The times include summary prefill, summary
 generation and context rebuilding; they are practical cold-input latency
 measurements, not isolated kernel throughput. This baseline preceded the system-prefix reuse optimization.
-The focused follow-up passed; the full reasoning-mode run remains in progress.
+The focused follow-up and full reasoning-mode run passed, including system-prefix reuse.
 
 The Q8 dispatch experiment compared an 8192-by-8192 projection over 512 input
 rows. All 4,194,304 output floats were bit-identical, but a wider dispatch took
@@ -417,3 +417,32 @@ text entered the answer extractor. Both runs exercised the default 512-token
 prefill setting. Evaluation retains its shared sampling defaults; the high-mode
 case explicitly used temperature 1 with the evaluation default min-p of 0.05.
 These two smoke cases are integration evidence, not a benchmark accuracy claim.
+
+## Full high-reasoning agent validation
+
+The complete 8192-context high-reasoning suite passed in 5229.6 seconds
+(87.2 minutes), using temperature 1, a 4096-token generation budget, and the
+default 512-token prefill. Its 262 memory samples peaked at 83.23 GiB process
+RSS. The system Swapouts counter increased by 32 pages, or 0.5 MiB; this is a
+system-wide counter and does not identify the process responsible.
+
+- Initial compaction reduced 7101 tokens to 2202 while retaining the recent
+  819-token tail. Native tools created and read `COMPACTION_OK`.
+- Save and restore took 1.33 and 0.72 seconds. The next tool request reused all
+  2985 saved tokens and created/read `AFTER_RESTORE`.
+- Near-full compaction reduced 8040 tokens to 2455, preserving all 1072
+  unsummarized tokens. The agent created and read `RECOVERED`.
+- The coding turn hit its boundary after 130 tokens, during private planning.
+  Its summary preserved the exact 80-function requirements and identified the
+  task as unfinished. Rebuilding restored the 1341-token system prefix and
+  evaluated only 411 new tokens. Continuation reused all 1752 rebuilt tokens.
+- Public output contained exactly `value_0` through `value_79` in ascending
+  order, with every literal square correct. Compilation and the executable
+  oracle passed. Generation used 2550 resumed tokens plus 130 carried tokens,
+  within the 4096-token budget.
+- Oversized input was rejected; the following turn created `AFTER_REJECTION`.
+
+The independent durable-state fixture places a fresh random recovery code
+early in the conversation, beyond the retained tail. It requires that exact
+code in the actual compaction-summary record, then asks the agent to use the
+remembered code in a file without repeating it. Its live 8K run is pending.
