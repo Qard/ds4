@@ -31,6 +31,14 @@ int ds4_gpu_muse_attention_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *q,
     uint32_t tokens, uint32_t heads, uint32_t kv_heads, uint32_t dim,
     uint32_t pos0, uint32_t cap, uint32_t window);
 
+/* Optional FP32 FlashAttention reduction for single-token decoding. Uses the
+ * same F16 KV and scratch capacity; batch/short contexts use the original path.
+ * Results are numerically equivalent, not bit identical to the original. */
+int ds4_gpu_muse_attention_flash_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *q,
+    const ds4_gpu_tensor *kc, const ds4_gpu_tensor *vc, ds4_gpu_tensor *scratch,
+    uint32_t tokens, uint32_t heads, uint32_t kv_heads, uint32_t dim,
+    uint32_t pos0, uint32_t cap, uint32_t window);
+
 int ds4_gpu_muse_residual_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *stream,
     const ds4_gpu_tensor *branch, const void *map, uint64_t size,
     uint64_t alpha_offset, uint64_t beta_offset, uint32_t rows, uint32_t width);

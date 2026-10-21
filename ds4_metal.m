@@ -50784,6 +50784,118 @@ int ds4_gpu_muse_attention_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *q,
                          MTLSizeMake(heads, tokens, 1));
 }
 
+/* Reuse the shared vector/reduce kernels without rounding FP32 queries to half.
+ * Pad only the final key tile, leaving caller KV buffers and ring layout intact. */
+int ds4_gpu_muse_attention_flash_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *q,
+                                        const ds4_gpu_tensor *kc, const ds4_gpu_tensor *vc,
+                                        ds4_gpu_tensor *scratch, uint32_t tokens, uint32_t heads,
+                                        uint32_t kv_heads, uint32_t dim, uint32_t pos0,
+                                        uint32_t cap, uint32_t window) {
+    if (tokens != 1)
+        return ds4_gpu_muse_attention_tensor(out, q, kc, vc, scratch, tokens, heads, kv_heads, dim,
+                                             pos0, cap, window);
+    if (!muse_attention_shape(tokens, heads, kv_heads, dim, pos0, cap))
+        return 0;
+    uint64_t end = (uint64_t)pos0 + 1, needed = window ? MIN(end, (uint64_t)window) : end;
+    if (cap < needed)
+        return 0;
+    uint32_t nkeys = (uint32_t)MIN(end, (uint64_t)cap);
+    /* Measured crossover: 256 regresses, 512 is inconsistent, 1024 wins. */
+    if (nkeys < 1024)
+        return ds4_gpu_muse_attention_tensor(out, q, kc, vc, scratch, tokens, heads, kv_heads, dim,
+                                             pos0, cap, window);
+    muse_bind b[4], ob;
+    if (!muse_tensor(&b[0], q, (uint64_t)heads * dim * 4) ||
+        !muse_tensor(&b[1], kc, (uint64_t)cap * kv_heads * dim * 2) ||
+        !muse_tensor(&b[2], vc, (uint64_t)cap * kv_heads * dim * 2) ||
+        !muse_tensor(&b[3], scratch, ds4_gpu_muse_attention_scratch_bytes(1, heads, dim)) ||
+        !muse_tensor(&ob, out, (uint64_t)heads * dim * 4))
+        return 0;
+    id<MTLBuffer> mask = ds4_gpu_new_transient_buffer((uint64_t)nkeys * 2, "Muse flash mask");
+    if (!mask)
+        return 0;
+    uint16_t *m = mask.contents;
+    for (uint32_t i = 0; i < nkeys; i++)
+        m[i] = 0xfc00;
+    uint64_t first = window && end > window ? end - window : 0;
+    for (uint64_t i = first; i < end; i++)
+        m[i % cap] = 0;
+    uint32_t nwg = 32, nsg = 2, stride = kv_heads * dim;
+    bool tail = nkeys % 32 != 0;
+    id<MTLComputePipelineState> p =
+        ds4_gpu_get_flash_attn_vec_pipeline("kernel_muse_flash_float_64", true, false, false, false,
+                                            tail, false, stride, stride, nsg, nwg);
+    id<MTLComputePipelineState> rp = ds4_gpu_get_flash_attn_reduce_pipeline(dim, nwg);
+    if (!p || !rp)
+        return 0;
+    uint64_t pad_bytes = (uint64_t)kv_heads * 32 * stride * 4 + 64;
+    if (tail && !ds4_gpu_ensure_scratch_buffer(&g_flash_attn_pad_buffer, &g_flash_attn_pad_bytes,
+                                               pad_bytes, "Muse flash pad"))
+        return 0;
+    ds4_gpu_flash_attn_vec_args a = {.ne01 = 1,
+                                     .ne02 = heads,
+                                     .ne03 = 1,
+                                     .nb01 = heads * dim * 4,
+                                     .nb02 = dim * 4,
+                                     .nb03 = heads * dim * 4,
+                                     .ne11 = nkeys,
+                                     .ne_12_2 = kv_heads,
+                                     .ne_12_3 = 1,
+                                     .ns10 = stride,
+                                     .nb11 = stride * 2,
+                                     .nb12 = dim * 2,
+                                     .nb13 = (uint64_t)cap * stride * 2,
+                                     .ns20 = stride,
+                                     .nb21 = stride * 2,
+                                     .nb22 = dim * 2,
+                                     .nb23 = (uint64_t)cap * stride * 2,
+                                     .ne31 = 1,
+                                     .ne32 = 1,
+                                     .ne33 = 1,
+                                     .nb31 = (uint64_t)nkeys * 2,
+                                     .nb32 = (uint64_t)nkeys * 2,
+                                     .nb33 = (uint64_t)nkeys * 2,
+                                     .ne1 = heads,
+                                     .ne2 = 1,
+                                     .ne3 = 1,
+                                     .scale = .125f};
+    int owned = 0;
+    id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+    if (!cb)
+        return 0;
+    if (tail) {
+        struct {
+            uint32_t keys, kv_heads, dim;
+        } pa = {nkeys, kv_heads, dim};
+        muse_bind pb[4] = {b[1], b[2], {mask, 0}, {g_flash_attn_pad_buffer, 0}};
+        if (!muse_dispatch_resources_threads(
+                "kernel_muse_flash_pad_tail", &pa, sizeof(pa), pb, 4,
+                MTLSizeMake(((uint64_t)32 * kv_heads * dim + 255) / 256, 1, 1), NULL, 0, 8))
+            return 0;
+    }
+    muse_bind bindings[7] = {
+        b[0], b[1], b[2], {mask, 0}, b[0], {tail ? g_flash_attn_pad_buffer : mask, 0}, b[3]};
+    id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+    [enc setComputePipelineState:p];
+    [enc setBytes:&a length:sizeof(a) atIndex:0];
+    for (unsigned i = 0; i < 7; i++)
+        [enc setBuffer:bindings[i].buf offset:bindings[i].off atIndex:i + 1];
+    [enc setThreadgroupMemoryLength:(128 + 4 * 32 + 2 * 128) * nsg * 2 atIndex:0];
+    [enc dispatchThreadgroups:MTLSizeMake(1, heads, nwg)
+        threadsPerThreadgroup:MTLSizeMake(32, nsg, 1)];
+    ds4_gpu_end_compute_encoder(cb, enc);
+    ds4_gpu_flash_attn_reduce_args ra = {.nrows = heads};
+    enc = ds4_gpu_compute_encoder(cb);
+    [enc setComputePipelineState:rp];
+    [enc setBytes:&ra length:sizeof(ra) atIndex:0];
+    [enc setBuffer:b[3].buf offset:b[3].off atIndex:1];
+    [enc setBuffer:ob.buf offset:ob.off atIndex:2];
+    [enc dispatchThreadgroups:MTLSizeMake(heads, 1, 1)
+        threadsPerThreadgroup:MTLSizeMake(32 * nwg, 1, 1)];
+    ds4_gpu_end_compute_encoder(cb, enc);
+    return ds4_gpu_finish_command_buffer(cb, owned, "Muse FP32 FlashAttention");
+}
+
 typedef struct { uint32_t rows, width; float scale, cap; } muse_pointwise_args;
 
 int ds4_gpu_muse_residual_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *stream,

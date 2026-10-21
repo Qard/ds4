@@ -16,6 +16,7 @@
 typedef struct {
     uint32_t pos, kv_highwater, swa_history_start, ctx_cap, cap_tokens;
     bool valid, cancelled;
+    bool flash_attention; /* Immutable math profile for this session and its KV. */
     ds4_session_cancel_fn cancel;
     void *cancel_ud;
 #define MUSE_FIELD(field,count) ds4_gpu_tensor *field;
@@ -149,7 +150,8 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
             muse_norm(g->k,g->k,m,l->attn_k_norm,T*DS4_N_HEAD_KV,DS4_N_HEAD_DIM) &&
             ds4_gpu_muse_kv_store_tensor(g->q,g->kc[il],g->vc[il],g->k,g->v,T,
                 DS4_N_HEAD,DS4_N_HEAD_KV,DS4_N_HEAD_DIM,g->pos,g->cache_cap[il],DS4_ROPE_FREQ_BASE,g_muse_swa[il]!=0) &&
-            ds4_gpu_muse_attention_tensor(g->attn,g->q,g->kc[il],g->vc[il],g->attn_part,T,
+            (g->flash_attention ? ds4_gpu_muse_attention_flash_tensor :
+                                  ds4_gpu_muse_attention_tensor)(g->attn,g->q,g->kc[il],g->vc[il],g->attn_part,T,
                 DS4_N_HEAD,DS4_N_HEAD_KV,DS4_N_HEAD_DIM,g->pos,g->cache_cap[il],g_muse_swa[il]?DS4_N_SWA:0) &&
             ds4_gpu_rms_norm_plain_rows_tensor(g->attn,g->attn,DS4_N_VALUE_DIM,T*DS4_N_HEAD,DS4_RMS_EPS) &&
             ds4_gpu_muse_gate_tensor(g->attn,g->attn,g->gate,T*DS4_N_HEAD*DS4_N_VALUE_DIM) &&

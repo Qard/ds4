@@ -1,6 +1,11 @@
 /* Native Muse KV uses the shared session payload envelope and bounded IO.
  * Store ring rows in token order, independent of the saving prefill capacity. */
 #define DS4_MUSE_PAYLOAD_TAG 0x4d555301u
+#define DS4_MUSE_FLASH_PAYLOAD_TAG 0x4d555302u
+
+static uint32_t muse_payload_tag(const ds4_muse_gpu_graph *g) {
+    return g->flash_attention ? DS4_MUSE_FLASH_PAYLOAD_TAG : DS4_MUSE_PAYLOAD_TAG;
+}
 
 static uint64_t muse_payload_size(uint32_t rows, uint32_t swa_live) {
     uint64_t bytes = DS4_SESSION_PAYLOAD_U32_FIELDS * sizeof(uint32_t) +
@@ -72,7 +77,7 @@ static int muse_session_save_payload(ds4_session *s, FILE *fp, char *err, size_t
     const uint32_t h[DS4_SESSION_PAYLOAD_U32_FIELDS] = {
         DS4_SESSION_PAYLOAD_MAGIC, DS4_SESSION_PAYLOAD_VERSION, g->ctx_cap,
         DS4_N_SWA, live, DS4_N_HEAD, DS4_N_MOE_LATENT, rows,
-        DS4_N_LAYER, DS4_N_HEAD_KV, DS4_N_HEAD_DIM, DS4_N_VOCAB, DS4_MUSE_PAYLOAD_TAG
+        DS4_N_LAYER, DS4_N_HEAD_KV, DS4_N_HEAD_DIM, DS4_N_VOCAB, muse_payload_tag(g)
     };
     for (unsigned i = 0; i < DS4_SESSION_PAYLOAD_U32_FIELDS; i++)
         if (payload_write_u32(fp, h[i], err, errlen)) return 1;
@@ -94,7 +99,7 @@ static int muse_session_load_payload(ds4_session *s, FILE *fp, const uint32_t *h
         uint64_t remaining, char *err, size_t errlen) {
     ds4_muse_gpu_graph *g = &s->muse_graph;
     const uint32_t rows = h[7], live = h[4];
-    if (!s->muse_graph_ready || h[12] != DS4_MUSE_PAYLOAD_TAG ||
+    if (!s->muse_graph_ready || h[12] != muse_payload_tag(g) ||
         !rows || rows > h[2] || h[2] > 1048576 || rows > g->ctx_cap ||
         h[3] != DS4_N_SWA || h[5] != DS4_N_HEAD || h[6] != DS4_N_MOE_LATENT ||
         h[8] != DS4_N_LAYER || h[9] != DS4_N_HEAD_KV ||

@@ -1098,3 +1098,58 @@ It was not retained. Avoiding temporary views for unsplit expert batches also
 failed its isolated paired throughput test and was removed. The expert tests
 retain offset input/output views and prefix/suffix guard checks, strengthening
 coverage of the existing path without changing runtime policy.
+
+
+An optional attention profile is being validated for additional decode speed:
+`DS4_MUSE_FLASH_ATTN=1`. It reuses ds4's vector FlashAttention and reduction
+kernels with FP32 queries, scores and accumulators and the existing F16 KV.
+Only single-token calls with at least 1024 cached keys use it; short contexts
+and batched prefill retain the original path. The default remains unchanged,
+and `--quality` overrides the environment flag. This profile is experimental
+until full-model quality validation is complete; it does not establish the
+10 tokens/s target.
+
+The profile is captured when a session is created. Checkpoints carry a distinct
+math-profile tag, and cross-profile imports fail before changing existing KV
+or logits. Recreate a checkpoint under the selected profile. Profiles cannot
+be changed midway through a session by mutating the environment. The existing
+memory admission and shared scratch allocator remain in use; padding the last
+key tile requires at most about 2 MiB for Muse's sixteen KV heads, without
+padding or modifying the caller's cache buffers.
+
+`make test-muse-attention` checks both profiles against the independent FP64
+reference, including newest-key retrieval, all sixteen KV heads, 8K global
+NoPE, sliding-window wraparound, offset views, and NaN cache guards. Session
+checks cover immutable selection, quality override, same-profile continuation
+and cross-profile rejection without checkpoint mutation.
+
+A private alternating 1024-step saved-8K comparison of the corrected attention
+adapter measured 6.6893 versus 6.2967 tokens/s: +6.23%, with a within-run 95%
+block interval of 5.49–6.96%. This is a different reduction order, not bit-exact
+parity with the default. Six of 1056 selected frontiers had different greedy
+IDs under the original teacher-forced trajectory; the worst accumulated
+logit difference was 2.0695 and minimum logit-vector cosine was 0.999778.
+The run peaked at 78.94 GiB RSS across 18 samples with no new system swapouts.
+The independent FP64 operator checks retain the existing error bounds, but
+these trajectory results are not a substitute for output-quality evaluation.
+
+A narrower eight-column FP32 matrix tile also failed to improve decoding:
+for the real Q6 projection it took 0.586 ms versus 0.139 ms for the native
+single-row kernel. It passed the independent numerical checks and batch
+consistency checks, but remains a discarded private experiment.
+
+
+The fresh 8K prefill and same-profile restore check completed with 55,159,104
+bit-identical logits and 272 selected IDs across the two sessions. Its two
+256-step measurements were 5.0345 and 5.0904 tokens/s after long prefill;
+they are repeat measurements of the same profile, not a default/fast A/B.
+The 841.84-second run peaked at 78.72 GiB RSS across 43 samples with no new
+system swapouts. Automatic power mode remained enabled. The 10 tokens/s
+sustained target remains unmet.
+
+Attention tests also verify that all cache bytes remain unchanged. At learned
+query-norm magnitudes, the FP64 attention oracle reads the actual FP32/F16
+RoPE outputs to isolate the dot/softmax error from CPU/GPU angle rounding.
+The original end-to-end RoPE checks and the 3e-5 attention bound are retained;
+stress errors for both profiles remain below 2.2e-6 on the tested global and
+sliding cases.

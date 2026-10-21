@@ -481,3 +481,30 @@ kernel void kernel_muse_expert_down_iq2_batch(constant muse_expert_batch_args &b
         }
     }
 }
+
+/* FP32 queries and accumulators; KV retains its native F16 representation. */
+template [[host_name("kernel_muse_flash_float_64")]] kernel flash_attn_ext_vec_t kernel_flash_attn_ext_vec<float4, float4, float4,float,float,float4,float4,half4,1,dequantize_f16_t4,half4,1,dequantize_f16_t4,64,64,4>;
+
+/* The shared FlashAttention template gives each KV head a private tail,
+ * retaining the physical cache row stride in its padded layout. */
+struct muse_flash_pad_args { uint keys, kv_heads, dim; };
+kernel void kernel_muse_flash_pad_tail(constant muse_flash_pad_args &a,
+    device const half *k, device const half *v, device const ushort *mask, device half *pad,
+    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint3 ntg [[threads_per_threadgroup]]) {
+    /* The host uses 32x8 threads: a scalar thread_position_in_grid is only X,
+     * not a flattened index. Every KV head must copy its newest key. */
+    uint i = group.x*ntg.x*ntg.y + tid;
+    uint stride = a.kv_heads*a.dim, tail = a.keys%32, first = a.keys-tail;
+    uint bank = a.kv_heads*32*stride;
+    if (i < 32) ((device ushort *)(pad+2*bank))[i] = i<tail ? mask[first+i] : 0xfc00u;
+    if (i >= 32*a.kv_heads*a.dim) return;
+    uint d = i%a.dim, row = (i/a.dim)%32, head = i/(a.dim*32);
+    uint to = head*32*stride + row*stride + d;
+    half x = 0, y = 0;
+    if (row < tail) {
+        ulong from = ulong(first+row)*stride + head*a.dim + d;
+        x = k[from]; y = v[from];
+    }
+    pad[to] = x; pad[bank+to] = y;
+}
