@@ -50760,7 +50760,7 @@ int ds4_gpu_muse_logits_tensor(ds4_gpu_tensor *logits, uint32_t n, float scale, 
 }
 
 int ds4_gpu_muse_prefetch_experts_tensor(const ds4_gpu_stream_expert_table *table,
-    const ds4_gpu_tensor *selected,uint32_t n_selected) {
+    const ds4_gpu_tensor *selected,uint32_t n_selected,uint64_t routing_event) {
     if(!g_ssd_streaming_mode || getenv("DS4_METAL_DISABLE_STREAMING_EXPERT_EARLY_LOAD")) return 1;
     if(!table || !table->model_map || !selected || !n_selected ||
         n_selected>DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED || n_selected>table->n_total_expert ||
@@ -50772,6 +50772,14 @@ int ds4_gpu_muse_prefetch_experts_tensor(const ds4_gpu_stream_expert_table *tabl
         table->n_total_expert>(table->model_size-table->gate_offset)/table->gate_expert_bytes ||
         table->n_total_expert>(table->model_size-table->up_offset)/table->gate_expert_bytes ||
         table->n_total_expert>(table->model_size-table->down_offset)/table->down_expert_bytes) return 0;
+    if(routing_event) {
+        /* Only routing must be CPU-visible here. Later independent latent
+         * work in this submission can continue while explicit SSD reads start. */
+        if(!ds4_gpu_commit_and_wait_selected_readback(routing_event,"Muse routing/latent overlap")) return 0;
+        int32_t ids[DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED];
+        if(!ds4_gpu_tensor_read(selected,0,ids,(uint64_t)n_selected*sizeof(*ids))) return 0;
+        return ds4_gpu_stream_expert_cache_begin_selected_load(table,ids,n_selected);
+    }
     return ds4_gpu_stream_expert_cache_begin_selected_load_tensor_impl(table,selected,n_selected,NULL);
 }
 

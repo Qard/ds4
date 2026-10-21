@@ -19,7 +19,7 @@ for 128 GB Apple Silicon Macs, using the existing ds4 engine and bounded SSD
 expert cache. Full-checkpoint tests on an M5 Max cover numerical consistency,
 8K contexts, three API formats, concurrent tools, native evaluation, and complete
 agent compaction/recovery with durable-state retention, at about 83 GiB RSS.
-Measured 8K decode is currently about 4.3 tokens/s; performance work targets
+Measured 8K decode is currently about 4.9 tokens/s; performance work targets
 10 tokens/s. See the linked guide for commands, evidence, and limitations.
 
 We test things in integration: model loading, prompt rendering,

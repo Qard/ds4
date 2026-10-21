@@ -94,14 +94,19 @@ static bool muse_norm(ds4_gpu_tensor *out,const ds4_gpu_tensor *x,const ds4_mode
                                                width,rows,DS4_RMS_EPS);
 }
 
-static bool muse_prefetch_experts(const ds4_model *m,const ds4_layer_weights *l,
-        uint32_t layer,const ds4_gpu_tensor *selected,uint32_t tokens) {
-    /* Decode exposes one routing vector. Start its bounded disk reads before
-     * the independent latent projection; prefill retains the batch loader. */
-    if(tokens!=1) return true;
+static bool muse_latent_with_prefetch(ds4_muse_gpu_graph *g,const ds4_model *m,
+        const ds4_layer_weights *l,uint32_t layer,uint32_t tokens) {
+    uint64_t event=0;
+    bool overlap=tokens==1&&!getenv("DS4_METAL_MUSE_LATENT_REFERENCE")&&
+        !getenv("DS4_METAL_DISABLE_STREAMING_EXPERT_EARLY_LOAD");
     ds4_gpu_stream_expert_table table=graph_stream_expert_table_make(m,l,layer,
         l->ffn_gate_exps->bytes/DS4_N_EXPERT,l->ffn_down_exps->bytes/DS4_N_EXPERT);
-    return ds4_gpu_muse_prefetch_experts_tensor(&table,selected,DS4_N_EXPERT_USED)!=0;
+    if(overlap) {
+        if(!ds4_gpu_signal_selected_readback_ready(&event)) return false;
+    } else if(tokens==1&&!ds4_gpu_muse_prefetch_experts_tensor(&table,g->selected,DS4_N_EXPERT_USED,0)) return false;
+    if(!muse_gemv(g->latent,m,l->ffn_latent_down,g->xn,tokens)||
+       !muse_norm(g->latent,g->latent,m,l->ffn_pre_exp_norm,tokens,DS4_N_MOE_LATENT)) return false;
+    return !overlap||ds4_gpu_muse_prefetch_experts_tensor(&table,g->selected,DS4_N_EXPERT_USED,event);
 }
 
 static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_model *m,const ds4_weights *w,
@@ -139,9 +144,7 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
             muse_gemv(g->router,m,l->ffn_gate_inp,g->xn,T) &&
             ds4_gpu_glm_router_select_batch_tensor(g->selected,g->weights,g->probs,m->map,m->size,
                 l->ffn_exp_probs_b->abs_offset,g->router,DS4_N_EXPERT,DS4_N_EXPERT_USED,DS4_EXPERT_WEIGHT_SCALE,T) &&
-            muse_prefetch_experts(m,l,il,g->selected,T) &&
-            muse_gemv(g->latent,m,l->ffn_latent_down,g->xn,T) &&
-            muse_norm(g->latent,g->latent,m,l->ffn_pre_exp_norm,T,DS4_N_MOE_LATENT) &&
+            muse_latent_with_prefetch(g,m,l,il,T) &&
             ds4_gpu_muse_experts_tensor(g->mid,g->part,g->latent,g->selected,m->map,m->size,
                 l->ffn_gate_exps->abs_offset,l->ffn_up_exps->abs_offset,l->ffn_down_exps->abs_offset,
                 l->ffn_gate_exps->type,l->ffn_down_exps->type,T,DS4_N_EXPERT,DS4_N_EXPERT_USED,

@@ -35,7 +35,7 @@ int ds4_gpu_muse_logits_tensor(ds4_gpu_tensor *logits, uint32_t n, float scale, 
 /* Begin the existing bounded pread work after routing, before latent projection.
  * Every begun load is joined before expert dispatch or graph failure returns. */
 int ds4_gpu_muse_prefetch_experts_tensor(const ds4_gpu_stream_expert_table *table,
-    const ds4_gpu_tensor *selected,uint32_t n_selected);
+    const ds4_gpu_tensor *selected,uint32_t n_selected,uint64_t routing_event);
 int ds4_gpu_muse_prefetch_finish(void);
 int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     const ds4_gpu_tensor *x, const ds4_gpu_tensor *selected,

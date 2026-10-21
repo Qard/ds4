@@ -48,8 +48,17 @@ int main(int argc, char **argv) {
         ds4_weights broken=w;broken.layer[0].ffn_pre_exp_norm=&invalid;
         assert(!muse_graph_forward(&failure,&m,&broken,ids,1,NULL,false));
         assert(!failure.valid && !ds4_gpu_commands_active());
-        /* Failure happens after routing and prefetch but before experts run.
-         * Installed entries prove the pending reads were joined on return. */
+        assert(ds4_gpu_stream_expert_cache_current_count()<=DS4_N_EXPERT_USED);
+        muse_graph_free(&failure);
+        ds4_gpu_set_streaming_expert_cache_budget(2);
+        assert(muse_graph_alloc(&failure,16,1));
+        invalid=*w.layer[0].ffn_gate_exps;invalid.type=UINT32_MAX;
+        broken=w;broken.layer[0].ffn_gate_exps=&invalid;
+        assert(!muse_graph_forward(&failure,&m,&broken,ids,1,NULL,false));
+        assert(!failure.valid && !ds4_gpu_commands_active());
+        /* Invalid latent weights fail before event submission. Invalid expert
+         * format fails after prefetch starts, before expert dispatch: installed
+         * entries prove pending reads were joined on the latter failure. */
         assert(ds4_gpu_stream_expert_cache_current_count()==DS4_N_EXPERT_USED);
         muse_graph_free(&failure);
         assert(muse_graph_alloc(&failure,16,1));float recovered[32];

@@ -98,7 +98,7 @@ int main(void) {
             const ds4_gpu_stream_expert_table table={.model_map=map,.model_size=SIZE,
                 .layer=0,.n_total_expert=E,.gate_offset=0,.up_offset=BANK,.down_offset=2*BANK,
                 .gate_expert_bytes=F*ROW,.down_expert_bytes=D*ROW};
-            assert(ds4_gpu_muse_prefetch_experts_tensor(&table,selected,S));
+            assert(ds4_gpu_muse_prefetch_experts_tensor(&table,selected,S,0));
         }
         assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,T,E,S,D,F,0));
         assert(ds4_gpu_muse_input_norm_tensor(part,part,map,SIZE,3*BANK,T*S,D,1e-8f));

@@ -635,3 +635,42 @@ measurement above. Q8 threadgroup sizing, a one-token Q8 specialization, and
 grouping attention query heads by their shared KV head preserved exact outputs
 but showed no useful model or kernel gain, so those production experiments
 were discarded.
+
+
+On the normalization build `89383b4`, the same fixed-cache sweep completed in
+1242.6 seconds, with all 808,192 saved frontier logits exactly matching the
+Q6_K baseline:
+
+| Context | Prefill tokens/s | Decode tokens/s |
+| ---: | ---: | ---: |
+| 2048 | 8.00 | 3.39 |
+| 4096 | 6.76 | 4.53 |
+| 6144 | 7.14 | 4.28 |
+| 8192 | 7.81 | 4.89 |
+
+The [CSV](../speed-bench/m5_max_muse_ud_iq2_xxs.csv) records all 128-token probes.
+The 63 memory samples peaked at 70.01 GiB RSS, with no increase in the system
+Swapouts counter. This was the 14-inch M5 Max with 18 CPU/40 GPU cores, on AC
+in Automatic power mode. Hardware state varied between sweeps; these numbers
+are observations, not a controlled 13% attribution to normalization. The
+balanced comparison above isolates its smaller gain. A host compilation ran
+during the last prefill interval and finished before the final decode probe.
+The latest sustained observation is 4.89 tokens/s; the 10 tokens/s target is
+still unmet.
+
+Decode now uses the existing Metal routing event to submit the independent
+latent projection alongside routing. CPU expert reads start once routing is
+ready, while the GPU can continue the latent work. This removes a submission
+round trip without changing kernels, routing, or expert cache capacity.
+A diagnostic rollback, `DS4_METAL_MUSE_LATENT_REFERENCE=1`, restores the earlier
+schedule for balanced comparison. Bounded fixtures cover GPU-produced routing,
+cache hits, forced reuse, and failure cleanup before and after read submission.
+Independent full graphs and session/memory regressions pass.
+
+With a 16-token prefix and 64 measured tokens per variant, the new schedule
+measured 8.19 versus 7.87 tokens/s, with all 13,941,312 logits and 68 selected
+IDs exact. At a 512-token prefix and 128 measured tokens, it measured 7.88
+versus 7.27 tokens/s, with all 26,872,384 logits and 132 selected IDs exact.
+Both runs used four warmup steps, two sessions sharing one engine/cache, and
+`--clone-prefix` in the native decode A/B harness. These observations establish
+the scheduling gain at short prefixes; they are not sustained 8K results.
