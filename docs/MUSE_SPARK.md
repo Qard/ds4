@@ -10,8 +10,9 @@ correctness and the conversation protocol.
 
 **Full-checkpoint numerical comparisons, 8K context tests, live APIs, native
 evaluation, and complete agent compaction/recovery suites in both reasoning
-modes pass on the 128 GiB M5 Max. The final durable-state canary and default-CLI
-smoke checks are in progress.**
+modes pass on the 128 GiB M5 Max. The final combined high-reasoning suite also
+passes early durable-state retention and later tool use. The default-CLI smoke
+check passes. Performance optimization toward 10 decode tokens/s is ongoing.**
 Builds and bounded fixture tests run independently of the downloaded checkpoint.
 
 ## Download
@@ -44,12 +45,25 @@ MLX. The earlier MLX checkpoint directory uses a different weight format.
 make -j6
 ```
 
-The native command to validate once sufficient memory is available is:
+Run a completion with the standard native binary:
 
 ```sh
 ./ds4 --model ~/.ds4/models/muse-spark-open-native.gguf --metal \
   --ctx 4096 --nothink --tokens 256 -p 'Hello'
 ```
+
+For the agent, use the same checkpoint and engine:
+
+```sh
+./ds4-agent --model ~/.ds4/models/muse-spark-open-native.gguf --metal \
+  --ctx 8192 --think --temp 1 --tokens 4096
+```
+
+Full-checkpoint validation currently covers contexts through 8192 tokens. Larger
+contexts have admission and bounded fixture coverage, but have not completed
+full-checkpoint validation on this Mac. Cold compaction of a newly supplied 8K
+archive can take tens of minutes; the measured throughput below describes that
+practical limitation.
 
 Muse selects SSD expert streaming automatically. The standard `ds4-server` and
 `ds4-agent` model options select the same engine. Chat uses Muse recipient
@@ -420,7 +434,8 @@ These two smoke cases are integration evidence, not a benchmark accuracy claim.
 
 ## Full high-reasoning agent validation
 
-The complete 8192-context high-reasoning suite passed in 5229.6 seconds
+Before the final compaction fixes described below, the complete 8192-context
+high-reasoning suite passed in 5229.6 seconds
 (87.2 minutes), using temperature 1, a 4096-token generation budget, and the
 default 512-token prefill. Its 262 memory samples peaked at 83.23 GiB process
 RSS. The system Swapouts counter increased by 32 pages, or 0.5 MiB; this is a
@@ -452,7 +467,8 @@ new user header without closing the cut message. The adapter now closes that
 body before the internal request, keeps incomplete recipient headers entirely
 in the retained tail, and reserves space for the possible closing token.
 Every token cut through user/assistant headers and bodies has a framing
-regression. Native revalidation reuses the failed canary code; it is pending.
+regression. The framed canary still omitted the code, so valid framing alone
+did not resolve semantic retention.
 
 Independent attention fixtures also compare the newest two queries after 8193
 positions against an FP64 CPU reference. A global NoPE sentinel requires a key
@@ -461,8 +477,8 @@ zero); its maximum error was 8.48e-7. The 2048-token sliding-ring/RoPE case had
 maximum error 1.02e-6. These checks use small synthetic tensors, not CPU model
 inference.
 
-The framed canary repeated the missing-code failure. Controlled native prompt
-probes then restored the same 6967-token source snapshot before each request;
+Controlled native prompt probes then restored the same 6967-token source
+snapshot before each request;
 all 202048 prefix logits restored exactly (maximum error zero). Direct retrieval
 returned the exact early code in 21 tokens. The existing summary request returned
 only its four-token acknowledgment. Clarifying that the next response must
@@ -475,4 +491,66 @@ meta-style acknowledgment-prone preamble. The common fact-preservation rules,
 summary budget, and tool restrictions remain the same. The production request
 was checked byte-for-byte against the successful controlled input. Final native
 validation combines the early-code canary with the complete 8K reasoning-mode
-agent recovery suite.
+agent recovery suite. On this build, the actual first summary preserved the exact
+code from beyond the retained tail, and a later native tool call wrote that code
+to a file without the request repeating it. Save/restore also passed, reusing all
+3819 saved tokens. Near-limit compaction preserved all 1100 unsummarized tokens;
+the subsequent native tools created and read `RECOVERED`. This synthetic
+archive-only summary reached its budget by repeating archive text, so that
+exchange establishes context recovery rather than useful summarization. The
+separate early-code exchange establishes fact retention. Code-continuation and
+input-rejection stages follow. The coding turn reached its reserve after 293
+tokens and resumed with all 1740 rebuilt tokens cached. Its 1549 resumed tokens
+plus 293 carried tokens stayed inside the 4096-token budget. Public output
+contained exactly 80 functions in ascending order with every literal square
+correct; compilation and the executable oracle passed. This archive-heavy
+summary was also uninformative, but the recent task and unfinished reasoning
+remained in the verbatim tail. Oversized input was rejected; the subsequent
+native tool created `AFTER_REJECTION`, and the turn ended normally.
+
+The complete final combined run on `b380d19` passed in 6052.7 seconds (100.9
+minutes). Its 303 memory samples peaked at 82.90 GiB process-tree RSS. The
+system-wide Swapouts counter increased by 61788 16-KiB pages (965.4 MiB);
+this run was not swap-free. A mid-run VM map reported a 66.3 GiB physical
+footprint, 18.3 GiB resident mapped weights, and about 1.2 GiB swapped in a
+graphics mapping. GPU aliases make VM region totals larger than unique RAM;
+neither those totals nor the system-wide counter identify unique model swap
+traffic. Earlier dedicated 8K benchmark and no-reasoning agent runs recorded no
+increase in Swapouts under their measured conditions.
+
+The final default-CLI smoke run returned exactly `CLI_OK`, exited successfully,
+and confirmed `prefill_cap=512` without an explicit chunk override. It measured
+4.32 prefill and 3.01 generation tokens/s on its short 159-token prompt; those
+short-run timings are a smoke check, not the sustained 8K benchmark.
+
+## Performance target and comparison
+
+The next target is 10 sustained decode tokens/s at an 8192-token frontier on
+the 128 GiB M5 Max, including both private reasoning and public output tokens.
+This is an optimization target, not an achieved result.
+
+The [website benchmark table](https://dwarfstar.sh/benchmarks/) mirrors the
+[upstream Flash Q2 results](https://github.com/antirez/ds4/blob/main/speed-bench/m5_max.csv).
+At 8192 tokens, that baseline reports 683.85 prefill and 37.03 generation
+tokens/s. It measures 2048 newly added prompt tokens and a 128-token greedy
+probe. Muse's existing 5.44/3.27 result instead measures 8192 prompt tokens and
+64 teacher-forced decode tokens, with 128-token prefill chunks. Those are useful
+starting observations, but not a matched cross-model benchmark.
+
+[DeepSeek's model card](https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash)
+lists Flash at 284B total / 13B active parameters and Pro at 1.6T / 49B.
+[Muse's model card](https://huggingface.co/meta-models/Muse-Spark-Open-816B-A42B)
+lists 816B / 42B. Muse therefore has about 3.2 times Flash's active parameter
+count, and its checkpoint requires SSD streaming where Flash Q2 fits resident.
+Similar hardware alone does not imply equal throughput. Dividing Flash's speed
+by the active-parameter ratio is only a rough sanity check; it ignores attention,
+quantized kernels, memory traffic, and SSD misses.
+
+Performance investigations use the existing native `ds4-bench` and its Metal
+encoder-timeline diagnostic. Instrumented kernel timings are kept separate
+from uninstrumented throughput. Cache size, cold/warm state, prompt, context,
+sampling, source revision, and full-vocabulary comparisons must accompany
+candidate measurements. Reported selected-expert synchronization time includes
+GPU work before routing readback; it is not SSD read time. Likewise, the overall
+cache-hit percentage includes reuse within prefill batches and is not a decode
+cache-hit measurement.

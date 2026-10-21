@@ -14,12 +14,13 @@ deliberately narrow, not a general GGUF runner: you need to use the
 GGUF files the project produces, that are part of the project
 itself.
 
-This fork is adding [native Muse Spark Open support](docs/MUSE_SPARK.md)
-for 128 GB Apple Silicon Macs. The GGUF downloader, native Metal graph,
-sessions, CLI, server, and agent adapters are integrated. Real-checkpoint short
-generation, logits consistency, KV round trips, three API formats and agent
-interruption/tool recovery pass. Long-context compaction and sustained performance
-validation are in progress; see the linked status.
+This fork includes [native Muse Spark Open support](docs/MUSE_SPARK.md)
+for 128 GB Apple Silicon Macs, using the existing ds4 engine and bounded SSD
+expert cache. Full-checkpoint tests on an M5 Max cover numerical consistency,
+8K contexts, three API formats, concurrent tools, native evaluation, and complete
+agent compaction/recovery with durable-state retention, at about 83 GiB RSS.
+Measured 8K decode is currently about 3.3 tokens/s; performance work targets
+10 tokens/s. See the linked guide for commands, evidence, and limitations.
 
 We test things in integration: model loading, prompt rendering,
 tool calls, KV state, the HTTP server, and the coding agent are built and tested together.
