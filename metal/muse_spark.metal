@@ -83,6 +83,45 @@ kernel void kernel_muse_linear_q6_tiled(constant muse_linear_args &a,
     if(lane==0) out[size_t(t)*a.out_dim+r]=sum;
 }
 
+/* Two output rows share input loads while retaining independent original
+ * serial FMAs and SIMD reductions. Only the final pair can contain a tail. */
+kernel void kernel_muse_linear_q6_rows2(constant muse_linear_args &a,
+    device const uchar *w,device const float *x,device float *out,
+    uint3 group [[threadgroup_position_in_grid]],ushort lane [[thread_index_in_simdgroup]]) {
+    uint first=group.x*2,t=group.y;
+    if(first>=a.out_dim||t>=a.rows) return;
+    device const float *input=x+size_t(t)*a.in_dim;
+    float acc[2]={0,0};
+#pragma unroll(4)
+    for(uint b=0;b<a.in_dim/256;b++) {
+#pragma unroll
+        for(uint h=0;h<2;h++) {
+            device const float *v=input+b*256+h*128+lane;
+            float x0=v[0],x1=v[32],x2=v[64],x3=v[96];
+#pragma unroll
+            for(ushort u=0;u<2;u++) if(first+u<a.out_dim) {
+                device const block_q6_K *block=(device const block_q6_K *)(w+size_t(first+u)*a.row_bytes)+b;
+                float d=float(block->d);
+                uint lo0=block->ql[h*64+lane],lo1=block->ql[h*64+32+lane];
+                uint hi=block->qh[h*32+lane],s=h*8+lane/16;
+                float q0=float(int((lo0&15u)|((hi&3u)<<4))-32);
+                float q1=float(int((lo1&15u)|(((hi>>2)&3u)<<4))-32);
+                float q2=float(int((lo0>>4)|(((hi>>4)&3u)<<4))-32);
+                float q3=float(int((lo1>>4)|(((hi>>6)&3u)<<4))-32);
+                acc[u]=fma((d*float(block->scales[s]))*q0,x0,acc[u]);
+                acc[u]=fma((d*float(block->scales[s+2]))*q1,x1,acc[u]);
+                acc[u]=fma((d*float(block->scales[s+4]))*q2,x2,acc[u]);
+                acc[u]=fma((d*float(block->scales[s+6]))*q3,x3,acc[u]);
+            }
+        }
+    }
+#pragma unroll
+    for(ushort u=0;u<2;u++) {
+        float sum=simd_sum(acc[u]);
+        if(lane==0&&first+u<a.out_dim) out[size_t(t)*a.out_dim+first+u]=sum;
+    }
+}
+
 /* Four RHS rows share packed bytes and dequantized FP32 weights. Each RHS
  * retains the same lane ownership and serial FMAs as one-token decode. */
 kernel void kernel_muse_linear_q6_batch4(constant muse_linear_args &a,

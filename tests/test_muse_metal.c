@@ -14,7 +14,7 @@ static double bench_seconds(void) {
 
 /* Bounded synthetic Q6_K matrices isolate projection work from SSD/cache
  * effects. Alternate order and require every output bit to match the control. */
-static int bench_linear(const char *rollback_env,double minimum_speedup) {
+static int bench_linear(const char *rollback_env,double minimum_speedup,bool decode_only) {
     enum {K=8192,N=8192,TMAX=512,ROW=K/256*210};
     size_t bytes=(size_t)N*ROW;
     unsigned char *map=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
@@ -29,14 +29,16 @@ static int bench_linear(const char *rollback_env,double minimum_speedup) {
     assert(x&&y&&ds4_gpu_tensor_write(x,0,input,(size_t)TMAX*K*4));
     assert(!setenv(rollback_env,"1",1));
     for(unsigned warm=0;warm<3;warm++)
-        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,TMAX)&&ds4_gpu_synchronize());
+        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,decode_only?1:TMAX)&&ds4_gpu_synchronize());
     const unsigned shapes[]={1,3,4,5,8,16,512};int rc=0;
+    const unsigned rounds=decode_only?24:6;
     for(unsigned shape=0;shape<sizeof(shapes)/sizeof(shapes[0]);shape++) {
-        unsigned rows=shapes[shape],reps=rows==512?1:8;double elapsed[2]={0};
+        unsigned rows=shapes[shape],reps=decode_only?32:rows==512?1:8;double elapsed[2]={0};
+        if(decode_only&&rows!=1) continue;
         assert(!setenv(rollback_env,"1",1));
         assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows));
         assert(ds4_gpu_tensor_read(y,0,reference,(size_t)rows*N*4));
-        for(unsigned round=0;round<6;round++) for(unsigned order=0;order<2;order++) {
+        for(unsigned round=0;round<rounds;round++) for(unsigned order=0;order<2;order++) {
             unsigned variant=(round+order)&1;
             assert(!(variant?unsetenv(rollback_env):setenv(rollback_env,"1",1)));
             /* Warm pipeline specialization before the timed batch. */
@@ -48,7 +50,7 @@ static int bench_linear(const char *rollback_env,double minimum_speedup) {
             if(memcmp(reference,actual,(size_t)rows*N*4)) {fprintf(stderr,"Q6_K linear drift rows=%u variant=%u\n",rows,variant);rc=1;goto done;}
         }
         double speedup=elapsed[0]/elapsed[1];
-        printf("Q6_K K=%u N=%u rows=%u rollback=%s control_ms=%.3f candidate_ms=%.3f speedup=%.4f exact=yes\n",K,N,rows,rollback_env,elapsed[0]*1000/(6*reps),elapsed[1]*1000/(6*reps),speedup);fflush(stdout);
+        printf("Q6_K K=%u N=%u rows=%u rollback=%s control_ms=%.3f candidate_ms=%.3f speedup=%.4f exact=yes\n",K,N,rows,rollback_env,elapsed[0]*1000/(rounds*reps),elapsed[1]*1000/(rounds*reps),speedup);fflush(stdout);
         if(speedup<minimum_speedup) rc=1;
     }
 done:
@@ -109,11 +111,11 @@ int main(int argc,char **argv) {
     if(argc>1) {
 
         char *minimum_end=NULL;double minimum=argc==4?strtod(argv[3],&minimum_end):0;
-        if(argc<3||argc>4||strcmp(argv[1],"--bench-linear")||!argv[2][0]||strchr(argv[2],'=')||!isfinite(minimum)||minimum<0||
+        if(argc<3||argc>4||(strcmp(argv[1],"--bench-linear")&&strcmp(argv[1],"--bench-linear-decode"))||!argv[2][0]||strchr(argv[2],'=')||!isfinite(minimum)||minimum<0||
            (argc==4&&(!argv[3][0]||*minimum_end))) {
-            fprintf(stderr,"usage: %s [--bench-linear ROLLBACK_ENV [MIN_SPEEDUP]]\n",argv[0]);return 2;
+            fprintf(stderr,"usage: %s [--bench-linear[-decode] ROLLBACK_ENV [MIN_SPEEDUP]]\n",argv[0]);return 2;
         }
-        return bench_linear(argv[2],minimum);
+        return bench_linear(argv[2],minimum,!strcmp(argv[1],"--bench-linear-decode"));
     }
     assert(ds4_gpu_init());
     const uint64_t map_size = 65536;
@@ -170,6 +172,27 @@ int main(int argc,char **argv) {
             float expected = 0;
             for (unsigned i = 0; i < K; i++) expected += decoded[r * K + i] * inputs[t * K + i];
             assert(fabsf(expected - actual[t * N + r]) < 1e-4f);
+        }
+    }
+    /* Q6 row pairs must preserve every original bit, including an odd final
+     * output row and the untouched guard immediately after each result. */
+    const unsigned q6_rows[]={1,3,5,7};
+    /* The final fixture above contains Q6 weights and its independent CPU
+     * decoded values. No extra weight bank or approximate reference is used. */
+    for(unsigned shape=0;shape<sizeof(q6_rows)/sizeof(*q6_rows);shape++) {
+        unsigned rows=q6_rows[shape];float reference[T*N];
+        assert(!setenv("DS4_METAL_MUSE_Q6_ROWS_REFERENCE","1",1));
+        assert(ds4_gpu_muse_linear_tensor(y,matrix,map_size,0,14,K,N,x,rows));
+        assert(ds4_gpu_tensor_read(y,0,reference,rows*N*4));
+        assert(ds4_gpu_tensor_write(y,(uint64_t)rows*N*4,guard,sizeof(guard)));
+        assert(!unsetenv("DS4_METAL_MUSE_Q6_ROWS_REFERENCE"));
+        assert(ds4_gpu_muse_linear_tensor(y,matrix,map_size,0,14,K,N,x,rows));
+        assert(ds4_gpu_tensor_read(y,0,actual,rows*N*4)&&!memcmp(reference,actual,rows*N*4));
+        assert(ds4_gpu_tensor_read(y,(uint64_t)rows*N*4,guard_actual,sizeof(guard_actual))&&!memcmp(guard,guard_actual,sizeof(guard)));
+        for(unsigned t=0;t<rows;t++) for(unsigned r=0;r<N;r++) {
+            float expected=0;
+            for(unsigned i=0;i<K;i++) expected+=decoded[r*K+i]*inputs[t*K+i];
+            assert(fabsf(expected-actual[t*N+r])<1e-4f);
         }
     }
     float norms[K], normed[T * K];

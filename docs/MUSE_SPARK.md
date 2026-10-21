@@ -910,3 +910,33 @@ graph, session, memory and 8193-token attention checks pass, and every native
 binary builds. Pipeline fast lookup and fixed/slab residency-set hints were
 also tested independently; their sub-1% native differences were inconclusive,
 so those policies are not changed.
+
+
+Single-token Q6 on M5 now shares input loads across two output rows, keeping
+each row's original serial FP32 FMAs and SIMD reduction. The odd final row
+is guarded; no new weights or scratch allocations are needed. Prefill and
+other devices retain their existing paths. The diagnostic
+`DS4_METAL_MUSE_Q6_ROWS_REFERENCE=1` selects the earlier single-row tile.
+
+On the same actual checkpoint inputs, the production and experimental row-pair
+kernels both improved the bounded 8192-by-8192 component test by about 15%.
+An initial short synthetic test was about 5% slower; a longer 24-round,
+32-repetition comparison measured about 20.5% faster, with every output bit
+exact. That variability is why component timings are not treated as native
+throughput evidence. The optional longer test is:
+
+```sh
+./tests/test_muse_metal --bench-linear-decode DS4_METAL_MUSE_Q6_ROWS_REFERENCE 1.1
+```
+
+The full saved-8K comparison completed 32 warmup and 1024 measured steps per
+path: row pairs measured 5.6013 versus 5.5066 tokens/s, a 1.72% improvement
+with a within-run 95% block-bootstrap interval of 1.08–2.37%. Both paths used
+the accepted concurrent projections. All 213,564,736 logits and 1,056 selected
+IDs matched bit-for-bit. Runtime was 400.88 seconds; 21 samples peaked at
+79.08 GiB RSS, and system swapouts did not increase. The independent decoded
+Q6 tests cover odd tails, guard regions and serial rollback without widening
+tolerances. Focused projection, quantization, complete graph, session, memory,
+long-attention checks and all native builds pass. Cross-run speeds remain
+variable; the paired gains establish modest improvements rather than proving
+the sustained 10 tokens/s target.

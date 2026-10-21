@@ -50653,11 +50653,14 @@ int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t si
     const char *kernel=type==14&&!getenv("DS4_METAL_MUSE_Q6_REFERENCE")?
         "kernel_muse_linear_q6":"kernel_muse_linear";
     if(type==14&&!getenv("DS4_METAL_MUSE_Q6_REFERENCE")&&!getenv("DS4_METAL_MUSE_Q6_LAYOUT_REFERENCE")) {
-        kernel=tokens==1?"kernel_muse_linear_q6_tiled":"kernel_muse_linear_q6_batch4";
+        bool paired=tokens==1&&ds4_gpu_device_is_m5_apple_silicon()&&
+            !getenv("DS4_METAL_MUSE_Q6_ROWS_REFERENCE");
+        kernel=paired?"kernel_muse_linear_q6_rows2":
+            tokens==1?"kernel_muse_linear_q6_tiled":"kernel_muse_linear_q6_batch4";
         id<MTLComputePipelineState> pipeline=ds4_gpu_get_pipeline(kernel);
         uint32_t groups=tokens==1?1:MIN(8u,MAX(1u,(uint32_t)(pipeline.maxTotalThreadsPerThreadgroup/32u)));
         return muse_dispatch_resources_threads(kernel,&a,sizeof(a),b,3,
-            MTLSizeMake(1u+(out_dim-1u)/groups,tokens==1?1:1u+(tokens-1u)/4u,1),NULL,0,groups);
+            MTLSizeMake(1u+(out_dim-1u)/(paired?2u:groups),tokens==1?1:1u+(tokens-1u)/4u,1),NULL,0,groups);
     }
     return muse_dispatch(kernel, &a, sizeof(a), b, 3, MTLSizeMake(out_dim, tokens, 1));
 }
