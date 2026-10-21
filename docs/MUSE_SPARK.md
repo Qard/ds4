@@ -8,9 +8,10 @@ loading, tokenizer, graph, sessions, KV persistence, CLI, server, evaluation, an
 adapters are implemented. Small independent fixtures exercise numerical
 correctness and the conversation protocol.
 
-**Real-checkpoint startup, short generation, full-vocabulary prefill consistency,
-KV round trips, live APIs, an 8K context sweep and agent interruption/tool recovery
-pass. Long-context compaction and final cross-chunk validation are in progress. This branch is not yet production-ready.**
+**Real-checkpoint startup, full-vocabulary prefill consistency, KV round trips,
+live APIs, an 8K context sweep and the no-reasoning agent compaction/recovery
+suite pass. Final cross-chunk and reasoning-mode validation are in progress.
+This branch is not yet production-ready.**
 Builds and bounded fixture tests run independently of the downloaded checkpoint.
 
 ## Download
@@ -325,3 +326,36 @@ Grouped raw ATEM replay now consumes a complete block per group of invokes,
 using the same grammar as generation parsing. Regressions cover two invokes in
 one block, separate blocks, and closing-looking block text inside a parameter,
 without duplicating calls or splitting parameter content.
+
+
+## Full agent compaction and recovery baseline
+
+The 8192-context, 512-token-prefill agent run passed its complete no-reasoning
+suite in 5530 seconds. The monitor retained 277 samples, with a peak process RSS
+of 83.28 GiB and no increase in system Swapouts over that sampled run.
+
+- Normal compaction reduced 7101 tokens to 2317 while retaining an 819-token
+  verbatim tail. The agent then created and read the requested `COMPACTION_OK` file.
+- A saved 2798-token session restored in about 0.7 seconds. Its first tool prompt
+  reused all 2798 tokens, and the agent created and read `AFTER_RESTORE`.
+- Context exhaustion at 8040 tokens summarized a bounded 6971-token prefix and
+  retained all 1069 unsummarized tokens. The rebuilt context had 2583 tokens;
+  the agent then created and read the requested `RECOVERED` file.
+- Code generation reached a context boundary after 416 tokens, compacted, and
+  resumed inside the same assistant message. The result contained exactly 80
+  complete functions in ascending order, compiled, and passed an executable
+  oracle checking every function's squared result.
+- Oversized input was rejected, and the following turn successfully created
+  `AFTER_REJECTION` while reusing the prior valid conversation.
+
+The first two compaction exchanges took about 25.7 and 26.7 minutes before
+resumed generation. These times include summary prefill, summary generation and
+context rebuilding; they are practical latency measurements, not isolated
+kernel throughput. This baseline preceded the system-prefix reuse optimization.
+The follow-up focused check and reasoning-mode run validate that change separately.
+
+The Q8 dispatch experiment compared an 8192-by-8192 projection over 512 input
+rows. All 4,194,304 output floats were bit-identical, but a wider dispatch took
+19.36 ms versus 13.05 ms for the existing eight-row slices, confirmed by a second
+baseline run. The wider variant was discarded without changing the production
+path.
