@@ -16,11 +16,14 @@ int main(int argc,char **argv) {
      * not reserve a vocabulary-sized output for every input token. */
     uint64_t per_token=1ull+6ull*DS4_N_EMBD+
         (uint64_t)DS4_N_HEAD_KV*(DS4_N_HEAD_DIM+DS4_N_VALUE_DIM)+
-        (uint64_t)DS4_N_HEAD*32*(DS4_N_HEAD_DIM+2)+
         2ull*DS4_N_MOE_LATENT+2ull*DS4_N_EXPERT+2ull*DS4_N_EXPERT_USED+
         (uint64_t)DS4_N_EXPERT_USED*(DS4_N_EXPERT+DS4_N_FF_EXP+DS4_N_MOE_LATENT);
     ds4_context_memory large=muse_graph_memory(8192,8192);
-    assert(large.scratch_bytes==(8192*per_token+DS4_N_EXPERT+DS4_N_VOCAB)*4);
+    uint64_t attention_tile=256ull*DS4_N_HEAD*32*(DS4_N_HEAD_DIM+2);
+    assert(large.scratch_bytes==(8192*per_token+attention_tile+DS4_N_EXPERT+DS4_N_VOCAB)*4);
+    assert(ds4_gpu_muse_attention_scratch_bytes(256,128,64)==256ull*128*32*66*4);
+    assert(ds4_gpu_muse_attention_scratch_bytes(257,128,64)==256ull*128*32*66*4);
+    assert(ds4_gpu_muse_attention_scratch_bytes(8192,128,64)==256ull*128*32*66*4);
     assert(muse_session_prefill_cap(&e,8192)==512);
     assert(muse_session_prefill_cap(&e,100)==100);
     assert(muse_session_memory_bytes(8192,muse_session_prefill_cap(&e,8192))==muse_session_memory_bytes(8192,512));

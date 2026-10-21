@@ -78,6 +78,22 @@ static void check_shape(unsigned T, unsigned cap, unsigned window, bool rope, un
     assert(ds4_gpu_end_commands());
     float *actual=malloc((size_t)rows*H*D*sizeof(float));assert(actual);
     assert(ds4_gpu_synchronize() && ds4_gpu_tensor_read(out,0,actual,rows*H*D*4));
+    if(rows>256) {
+        /* A bounded scratch tile must preserve each query's original key
+         * partition and reduction, including a nonzero query view offset. */
+        float *single=malloc((size_t)rows*H*D*4);assert(single);
+        assert(ds4_gpu_begin_commands());
+        for(unsigned row=0;row<rows;row++) {
+            ds4_gpu_tensor *one_q=ds4_gpu_tensor_view(query,(uint64_t)row*H*D*4,(uint64_t)H*D*4);
+            ds4_gpu_tensor *one_o=ds4_gpu_tensor_view(out,(uint64_t)row*H*D*4,(uint64_t)H*D*4);
+            assert(one_q&&one_o);
+            assert(ds4_gpu_muse_attention_tensor(one_o,one_q,kc,vc,part,1,H,KV,D,start+row,cap,window));
+            ds4_gpu_tensor_free(one_q);ds4_gpu_tensor_free(one_o);
+        }
+        assert(ds4_gpu_end_commands());
+        assert(ds4_gpu_tensor_read(out,0,single,(size_t)rows*H*D*4));
+        assert(!memcmp(single,actual,(size_t)rows*H*D*4));free(single);
+    }
     if(flash && rows==1 && (T<cap?T:cap)<1024) {
         /* Small contexts retain the original arithmetic and launch policy. */
         float *reference=malloc((size_t)rows*H*D*4);assert(reference);
@@ -150,6 +166,7 @@ int main(int argc,char **argv) {
     flash=argc==2;
     assert(ds4_gpu_init());
     check(10,16,0,false); check(10,16,4,true); check(10,7,4,true);
+    check(257,512,0,false); check(257,512,127,true);
     check(70,128,0,false); check(70,128,35,true); check(70,39,35,true);
     /* Compare only the newest queries, but include every visible key in the
      * independent FP64 reference. Keep 8K tensors on the heap. */

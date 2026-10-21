@@ -50786,7 +50786,9 @@ int ds4_gpu_muse_kv_store_tensor(ds4_gpu_tensor *q, ds4_gpu_tensor *kc, ds4_gpu_
 
 uint64_t ds4_gpu_muse_attention_scratch_bytes(uint32_t tokens, uint32_t heads, uint32_t dim) {
     if (!tokens || !heads || heads > 128 || dim != 64) return 0;
-    return (uint64_t)tokens*heads*32*(dim+2)*4;
+    /* Each query has an independent key partition and reduction. Reuse a
+     * bounded query tile instead of reserving 8.25 GiB for an 8K prefill. */
+    return (uint64_t)MIN(tokens,256u)*heads*32*(dim+2)*4;
 }
 
 int ds4_gpu_muse_attention_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *q,
@@ -50805,11 +50807,19 @@ int ds4_gpu_muse_attention_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *q,
         !muse_tensor(&b[3], scratch, ds4_gpu_muse_attention_scratch_bytes(tokens, heads, dim)) ||
         !muse_tensor(&merge[1], out, projection)) return 0;
     merge[0] = b[3];
-    muse_attention_args args = {tokens, heads, kv_heads, dim, pos0, cap, window, 0, 0};
-    return muse_dispatch("kernel_muse_attention_split", &args, sizeof(args), b, 4,
-                         MTLSizeMake(heads, 32, tokens)) &&
-           muse_dispatch("kernel_muse_attention_merge", &args, sizeof(args), merge, 2,
-                         MTLSizeMake(heads, tokens, 1));
+    const NSUInteger query_base=b[0].off, output_base=merge[1].off;
+    for (uint32_t first=0;first<tokens;) {
+        uint32_t rows=MIN(tokens-first,256u);
+        muse_attention_args args={rows,heads,kv_heads,dim,pos0+first,cap,window,0,0};
+        b[0].off=query_base+(uint64_t)first*heads*dim*4;
+        merge[1].off=output_base+(uint64_t)first*heads*dim*4;
+        if (!muse_dispatch("kernel_muse_attention_split",&args,sizeof(args),b,4,
+                           MTLSizeMake(heads,32,rows)) ||
+            !muse_dispatch("kernel_muse_attention_merge",&args,sizeof(args),merge,2,
+                           MTLSizeMake(heads,rows,1))) return 0;
+        first+=rows;
+    }
+    return 1;
 }
 
 /* Reuse the shared vector/reduce kernels without rounding FP32 queries to half.

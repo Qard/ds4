@@ -1205,6 +1205,19 @@ or KV/position changes. Graph and session checks cover the bounded allocation,
 explicit diagnostic rows, checkpoint continuation and the independent memory
 estimate. This allocation change does not itself establish a throughput gain.
 
+The reference attention path also reuses scratch across at most 256 query
+rows. Each row keeps its original 32 key partitions, online softmax and merge
+order; only query/output offsets and the absolute starting position advance.
+At an 8192-token prefill, attention scratch falls from 8.25 GiB to 264 MiB,
+freeing another 7.99 GiB per session for the existing admission/cache budget.
+Decode and batches of up to 256 rows retain the original dispatch shape.
+Component comparisons at tile boundaries and 8192 rows were bit-exact against
+the previous full-grid implementation, with offset guards and input/KV
+nonmutation checks. The independent FP64 attention checks, exact batched versus
+single-query checks, graph/session restore, memory and routing-timeline suites
+passed. The 8K global-attention component measured 1809.71 versus 1870.43 ms;
+this is an operator result, not a demonstrated full-model throughput gain.
+
 Before that allocation reduction, the production `ds4-bench` completed an
 8192-token prefill in one chunk, then 1024 real-text teacher-forced decode
 steps: 14.49 prefill tokens/s and 5.20 decode tokens/s (5.22 excluding the first
@@ -1254,3 +1267,18 @@ bit-for-bit at batch lengths 1, 3, 33 and 512: 71,958,528 mid/output floats
 across the SIMD and MPP variants. Prefix/suffix and unused-tail guards passed.
 The SIMD variant was slightly faster than MPP, so subsequent research can
 reuse the existing SIMD kernel without changing the shared MPP implementation.
+
+
+The private combined FP32 dense/expert matrix prefill completed a fresh 8192-token
+prefix in 138.48 seconds (59.16 tokens/s). The earlier native matvec run measured
+14.49 tokens/s; these sequential runs are not a paired prefill attribution.
+Same-profile snapshot restore matched 404096 initial/continuation logit floats
+bit-for-bit.
+On the actual 1024-token book continuation, mean loss was 0.445902 versus the
+reference's 0.444989 nats/token: delta +0.000913, with a 16-token block-bootstrap
+95% interval of -0.001452 to +0.003193. Perplexity changed by +0.0913%, and three
+of 1025 greedy-frontier IDs differed. This limited check does not establish
+representative model quality. Paired decode measured 4.5410 versus 4.2536
+tokens/s with two large-prefill sessions resident; it does not establish the
+single-session rate or the 10 tokens/s target. This research uses a separate
+payload tag that production rejects and has not changed the default math.
