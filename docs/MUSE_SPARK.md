@@ -400,3 +400,11 @@ reasoning and tool selection. The prefix/body regression and real-checkpoint rev
 restored all 1341 system tokens in 55 ms, rebuilt a 503-token suffix, and created
 and read back `COMPACTION_OK` through native tools. The failed run is retained
 as evidence.
+
+The two-resident-session server passed six concurrent cross-process tool-result
+replays across all three APIs, with each reply pair deliberately reversed.
+Both slots restored the 682-token disk prefix. Four fresh JSON/SSE tool-call
+cases additionally passed reversed output-only continuations for Anthropic and
+Responses: all exact left/right nonce results matched, using the 859-token live
+frontier and only 78-89 new result tokens. Disk-cache eviction at its configured
+8 GiB limit also completed without disrupting continuations.
