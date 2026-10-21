@@ -692,3 +692,28 @@ with all 58,391,872 logits and 288 selected IDs exact. Scheduling gains depend
 on context and cache state; the standalone sustained target remains unmet.
 Skipping an additional latent wait preserved correctness but gave only about
 1% in its short comparison, so that extra path was removed.
+
+
+Q6_K now exposes four blocks to the decode scheduler and reuses packed weights
+across four input rows during prefill. Each row keeps the original lane mapping,
+serial FP32 FMAs, and SIMD reduction. Independent SIMD groups pack output rows,
+with the group count capped by the device pipeline limit. No dequantized weight
+bank or additional tensor allocation is introduced. Partial input tiles and
+partial output groups have strict output-bit and bounds-canary coverage.
+
+```sh
+make tests/test_muse_metal
+./tests/test_muse_metal --bench-linear DS4_METAL_MUSE_Q6_LAYOUT_REFERENCE 1.05
+```
+
+Against the earlier optimized Q6_K kernel, the bounded comparison measured
+1.09x at one input row, 1.50x/1.66x/1.40x at 3/4/5 rows, and 1.72x/1.74x/1.69x
+at 8/16/512 rows. Every output bit matched. A 16-token restored-prefix decode
+A/B, with 32 warmups and 256 measured tokens per variant, measured 7.88 versus
+7.70 tokens/s with all 58,391,872 logits and 288 selected IDs exact. A balanced
+ABBA prefill comparison of four fresh 512-token prompts measured 13.61 versus
+12.77 tokens/s, with all 808,192 frontier logits exact. Its chunk size was 512,
+context allocation 4096, and shared auto-admitted expert cache 59.80 GiB.
+These are component and short-prefix observations; the sustained 8K target
+still needs further optimization. Wider unrolls and eight-input tiles were
+measured and rejected in favor of this layout.

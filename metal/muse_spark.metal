@@ -49,6 +49,77 @@ kernel void kernel_muse_linear_q6(constant muse_linear_args &a,
     if(lane==0) out[size_t(t)*a.out_dim+r]=sum;
 }
 
+/* Preserve the serial FMA sequence while exposing four blocks to the
+ * scheduler. SIMD groups own independent rows; prefill can pack them. */
+kernel void kernel_muse_linear_q6_tiled(constant muse_linear_args &a,
+    device const uchar *w,device const float *x,device float *out,
+    uint3 group [[threadgroup_position_in_grid]],ushort lane [[thread_index_in_simdgroup]],
+    ushort simd [[simdgroup_index_in_threadgroup]],uint3 threads [[threads_per_threadgroup]]) {
+    uint r=group.x*threads.y+simd,t=group.y;
+    if(r>=a.out_dim||t>=a.rows) return;
+    device const block_q6_K *blocks=(device const block_q6_K *)(w+size_t(r)*a.row_bytes);
+    device const float *input=x+size_t(t)*a.in_dim;
+    float acc=0;
+#pragma unroll(4)
+    for(uint b=0;b<a.in_dim/256;b++) {
+        device const block_q6_K *block=blocks+b;
+        float d=float(block->d);
+#pragma unroll
+        for(uint h=0;h<2;h++) {
+            uint lo0=block->ql[h*64+lane],lo1=block->ql[h*64+32+lane];
+            uint hi=block->qh[h*32+lane],s=h*8+lane/16;
+            device const float *v=input+b*256+h*128+lane;
+            float q0=float(int((lo0&15u)|((hi&3u)<<4))-32);
+            float q1=float(int((lo1&15u)|(((hi>>2)&3u)<<4))-32);
+            float q2=float(int((lo0>>4)|(((hi>>4)&3u)<<4))-32);
+            float q3=float(int((lo1>>4)|(((hi>>6)&3u)<<4))-32);
+            acc=fma((d*float(block->scales[s]))*q0,v[0],acc);
+            acc=fma((d*float(block->scales[s+2]))*q1,v[32],acc);
+            acc=fma((d*float(block->scales[s+4]))*q2,v[64],acc);
+            acc=fma((d*float(block->scales[s+6]))*q3,v[96],acc);
+        }
+    }
+    float sum=simd_sum(acc);
+    if(lane==0) out[size_t(t)*a.out_dim+r]=sum;
+}
+
+/* Four RHS rows share packed bytes and dequantized FP32 weights. Each RHS
+ * retains the same lane ownership and serial FMAs as one-token decode. */
+kernel void kernel_muse_linear_q6_batch4(constant muse_linear_args &a,
+    device const uchar *w,device const float *x,device float *out,
+    uint3 group [[threadgroup_position_in_grid]],ushort lane [[thread_index_in_simdgroup]],
+    ushort simd [[simdgroup_index_in_threadgroup]],uint3 threads [[threads_per_threadgroup]]) {
+    uint row=group.x*threads.y+simd,t=group.y*4;
+    if(row>=a.out_dim||t>=a.rows) return;
+    device const block_q6_K *blocks=(device const block_q6_K *)(w+size_t(row)*a.row_bytes);
+    float acc[4]={0,0,0,0};
+    for(uint b=0;b<a.in_dim/256;b++) {
+        device const block_q6_K *block=blocks+b;float d=float(block->d);
+#pragma unroll
+        for(uint h=0;h<2;h++) {
+            uint lo0=block->ql[h*64+lane],lo1=block->ql[h*64+32+lane];
+            uint hi=block->qh[h*32+lane],sc=h*8+lane/16;
+            float q0=float(int((lo0&15u)|((hi&3u)<<4))-32);
+            float q1=float(int((lo1&15u)|(((hi>>2)&3u)<<4))-32);
+            float q2=float(int((lo0>>4)|(((hi>>4)&3u)<<4))-32);
+            float q3=float(int((lo1>>4)|(((hi>>6)&3u)<<4))-32);
+            float w0=(d*float(block->scales[sc]))*q0,w1=(d*float(block->scales[sc+2]))*q1;
+            float w2=(d*float(block->scales[sc+4]))*q2,w3=(d*float(block->scales[sc+6]))*q3;
+#pragma unroll
+            for(uint r=0;r<4;r++) if(t+r<a.rows) {
+                device const float *v=x+size_t(t+r)*a.in_dim+b*256+h*128+lane;
+                acc[r]=fma(w0,v[0],acc[r]);acc[r]=fma(w1,v[32],acc[r]);
+                acc[r]=fma(w2,v[64],acc[r]);acc[r]=fma(w3,v[96],acc[r]);
+            }
+        }
+    }
+#pragma unroll
+    for(uint r=0;r<4;r++) {
+        float sum=simd_sum(acc[r]);
+        if(lane==0&&t+r<a.rows) out[size_t(t+r)*a.out_dim+row]=sum;
+    }
+}
+
 struct muse_norm_args { uint rows, width; float eps; };
 
 kernel void kernel_muse_input_norm(constant muse_norm_args &a,

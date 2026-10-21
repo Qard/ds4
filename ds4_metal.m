@@ -50563,13 +50563,13 @@ static bool muse_weight_bind(muse_bind *b, const void *map, uint64_t size, uint6
     return b->buf != nil;
 }
 
-static int muse_dispatch_resources(const char *name, const void *args, size_t length,
+static int muse_dispatch_resources_threads(const char *name, const void *args, size_t length,
                          const muse_bind *binds, unsigned count, MTLSize grid,
-                         ds4_gpu_stream_expert_cache_entry *const *resources, unsigned resource_count) {
+                         ds4_gpu_stream_expert_cache_entry *const *resources, unsigned resource_count,uint32_t simdgroups) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
     @autoreleasepool {
         id<MTLComputePipelineState> pipeline = ds4_gpu_get_pipeline(name);
-        if (!pipeline) return 0;
+        if (!pipeline || !simdgroups || 32u*simdgroups>pipeline.maxTotalThreadsPerThreadgroup) return 0;
         int owned = 0;
         id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
         if (!cb) return 0;
@@ -50585,10 +50585,16 @@ static int muse_dispatch_resources(const char *name, const void *args, size_t le
         [enc setBytes:args length:length atIndex:0];
         for (unsigned i = 0; i < count; i++)
             [enc setBuffer:binds[i].buf offset:binds[i].off atIndex:i + 1];
-        [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(32, 1, 1)];
+        [enc dispatchThreadgroups:grid threadsPerThreadgroup:MTLSizeMake(32, simdgroups, 1)];
         ds4_gpu_end_compute_encoder(cb, enc);
         return ds4_gpu_finish_command_buffer(cb, owned, name);
     }
+}
+
+static int muse_dispatch_resources(const char *name,const void *args,size_t length,
+    const muse_bind *binds,unsigned count,MTLSize grid,
+    ds4_gpu_stream_expert_cache_entry *const *resources,unsigned resource_count) {
+    return muse_dispatch_resources_threads(name,args,length,binds,count,grid,resources,resource_count,1);
 }
 
 static int muse_dispatch(const char *name, const void *args, size_t length,
@@ -50646,6 +50652,13 @@ int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t si
     /* Diagnostic rollback permits same-engine, exact-logit speed comparisons. */
     const char *kernel=type==14&&!getenv("DS4_METAL_MUSE_Q6_REFERENCE")?
         "kernel_muse_linear_q6":"kernel_muse_linear";
+    if(type==14&&!getenv("DS4_METAL_MUSE_Q6_REFERENCE")&&!getenv("DS4_METAL_MUSE_Q6_LAYOUT_REFERENCE")) {
+        kernel=tokens==1?"kernel_muse_linear_q6_tiled":"kernel_muse_linear_q6_batch4";
+        id<MTLComputePipelineState> pipeline=ds4_gpu_get_pipeline(kernel);
+        uint32_t groups=tokens==1?1:MIN(8u,MAX(1u,(uint32_t)(pipeline.maxTotalThreadsPerThreadgroup/32u)));
+        return muse_dispatch_resources_threads(kernel,&a,sizeof(a),b,3,
+            MTLSizeMake(1u+(out_dim-1u)/groups,tokens==1?1:1u+(tokens-1u)/4u,1),NULL,0,groups);
+    }
     return muse_dispatch(kernel, &a, sizeof(a), b, 3, MTLSizeMake(out_dim, tokens, 1));
 }
 

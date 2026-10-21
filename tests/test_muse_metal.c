@@ -30,8 +30,8 @@ static int bench_linear(const char *rollback_env,double minimum_speedup) {
     assert(!setenv(rollback_env,"1",1));
     for(unsigned warm=0;warm<3;warm++)
         assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,TMAX)&&ds4_gpu_synchronize());
-    const unsigned shapes[]={1,16,512};int rc=0;
-    for(unsigned shape=0;shape<3;shape++) {
+    const unsigned shapes[]={1,3,4,5,8,16,512};int rc=0;
+    for(unsigned shape=0;shape<sizeof(shapes)/sizeof(shapes[0]);shape++) {
         unsigned rows=shapes[shape],reps=rows==512?1:8;double elapsed[2]={0};
         assert(!setenv(rollback_env,"1",1));
         assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows));
@@ -120,12 +120,14 @@ int main(int argc,char **argv) {
     unsigned char *matrix = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     assert(matrix != MAP_FAILED && ds4_gpu_set_model_map(matrix, map_size));
     const unsigned types[] = {0, 8, 30, 14};
-    const unsigned K = 256, N = 17, T = 2;
+    const unsigned K = 256, N = 17, T = 7;
     ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(T * K * sizeof(float));
-    ds4_gpu_tensor *y = ds4_gpu_tensor_alloc(T * N * sizeof(float));
+    ds4_gpu_tensor *y = ds4_gpu_tensor_alloc((T + 1) * N * sizeof(float));
     float inputs[T * K], actual[T * N];
     for (unsigned i = 0; i < T * K; i++) inputs[i] = ((int)(i % 13) - 6) * .0625f;
     assert(x && y && ds4_gpu_tensor_write(x, 0, inputs, sizeof(inputs)));
+    float guard[N],guard_actual[N];
+    for(unsigned i=0;i<N;i++) guard[i]=9000.f+i*.125f;
     float decoded[N * K];
     for (unsigned w = 0; w < sizeof(types) / sizeof(types[0]); w++) {
         const unsigned type = types[w];
@@ -158,9 +160,12 @@ int main(int argc,char **argv) {
                 }
             }
         }
+        assert(ds4_gpu_tensor_write(y,(uint64_t)T*N*4,guard,sizeof(guard)));
         assert(ds4_gpu_muse_linear_tensor(y, matrix, map_size, 0, type, K, N, x, T));
         assert(ds4_gpu_synchronize());
         assert(ds4_gpu_tensor_read(y, 0, actual, sizeof(actual)));
+        assert(ds4_gpu_tensor_read(y,(uint64_t)T*N*4,guard_actual,sizeof(guard_actual)));
+        assert(!memcmp(guard,guard_actual,sizeof(guard)));
         for (unsigned t = 0; t < T; t++) for (unsigned r = 0; r < N; r++) {
             float expected = 0;
             for (unsigned i = 0; i < K; i++) expected += decoded[r * K + i] * inputs[t * K + i];
