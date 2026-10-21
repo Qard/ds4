@@ -1214,3 +1214,43 @@ Its admitted layout was 79.53 GiB, including a 40.79 GiB expert cache and
 system swapouts. The separate process-RSS peak was 59.11 GiB; it does not
 include all unmapped private GPU buffers. This is a single-session native
 measurement, not a paired attribution or evidence that 10 tokens/s is met.
+
+
+The optional attention profile also completed a true-token loss comparison on
+1024 tokens of the book's actual continuation after the saved 8K prefix. Both
+native sessions restored their corresponding prefill profiles, then consumed
+the same real tokens. Mean next-token loss was 0.444989 nats for the reference
+and 0.444705 for FlashAttention: delta -0.000283 nats, with a within-run 16-token
+block-bootstrap interval of -0.001535 to +0.000858. There were no greedy-frontier
+ID differences across 1025 frontiers. This found no loss increase on this one
+continuation; it is neither a representative perplexity benchmark nor evidence
+of a general accuracy improvement. The paired decode measurements were 6.2871
+versus 5.8442 tokens/s. The 360.77-second run peaked at 78.13 GiB process RSS
+across 19 samples, with no new system swapouts and Automatic power unchanged.
+The native checkpoint restores also exercise the new one-row logit allocation.
+
+A private routed-prefill experiment instantiated the existing grouped matrix
+kernel with FP32 weights, inputs and accumulation. On eight actual checkpoint
+experts, each selected for every token of a dense 512-token test, it measured
+31.90 ms versus 153.78 ms for Muse's four-RHS grouped kernel. The largest
+mid/output differences were 1.01e-5 and 6.08e-6, below the existing 1e-4 bound.
+Independent FP64 dots using the official GGUF decoder gave sampled gate/up
+errors below 1.8e-6. This dense component result is not a full-model speedup:
+Muse normally has 256 experts and fewer rows per expert. It is not a runtime
+policy. The existing quantized matvec remains in use; a separate generic Q6
+specialization failed to establish a material isolated decode improvement.
+
+The native high-reasoning AIME 2025 smoke case also passed with the attention
+profile enabled: expected/picked answer 70, 221 prompt tokens and 1349 generated
+tokens, crossing the fast-path context threshold. This is one task-level check,
+not a benchmark accuracy claim. Cache diagnostics recorded a 0.937 aggregate
+hit rate and about 27.9 seconds of accumulated pread timing; these counters
+include prefill and overlapping reads and cannot be subtracted as a clean
+serial decode bottleneck. The expert-matmul research remains separate from
+this validated production attention profile.
+
+The private FP32 expert kernels also matched their own single-row results
+bit-for-bit at batch lengths 1, 3, 33 and 512: 71,958,528 mid/output floats
+across the SIMD and MPP variants. Prefix/suffix and unused-tail guards passed.
+The SIMD variant was slightly faster than MPP, so subsequent research can
+reuse the existing SIMD kernel without changing the shared MPP implementation.
