@@ -204,6 +204,30 @@ kernel void kernel_muse_input_norm_unroll(constant muse_norm_args &a,
     }
 }
 
+/* Parallelize memory accesses while one SIMD group keeps the reference
+ * serial FMA sequence and reduction. The same temporary holds the inverse
+ * after that group finishes reading its inputs. Reloading x*w for the final
+ * stores also permits exact in-place normalization. */
+kernel void kernel_muse_input_norm_staged(constant muse_norm_args &a,
+    device const float *x, device const float *w, device float *out,
+    threadgroup float *temp [[threadgroup(0)]],
+    uint3 group [[threadgroup_position_in_grid]], uint tid [[thread_index_in_threadgroup]],
+    uint3 ntg [[threads_per_threadgroup]], ushort lane [[thread_index_in_simdgroup]]) {
+    if (group.x>=a.rows) return;
+    size_t base=size_t(group.x)*a.width;
+    for (uint i=tid;i<a.width;i+=ntg.x) temp[i]=x[base+i]*w[i];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (tid<32) {
+        float sum=0;
+        for (uint i=lane;i<a.width;i+=32) {float v=temp[i];sum=fma(v,v,sum);}
+        float inv=metal::precise::rsqrt(simd_sum(sum)/a.width+a.eps);
+        if (lane==0) temp[0]=inv;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv=temp[0];
+    for (uint i=tid;i<a.width;i+=ntg.x) {float v=x[base+i];v*=w[i];v*=inv;out[base+i]=v;}
+}
+
 struct muse_attention_args {
     uint tokens, heads, kv_heads, dim, pos0, cap, window, rope;
     float rope_base;

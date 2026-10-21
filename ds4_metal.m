@@ -50722,6 +50722,32 @@ int ds4_gpu_muse_input_norm_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,
     if (!muse_tensor(&b[0], x, (uint64_t)rows * width * 4) ||
         !muse_weight_bind(&b[1], map, size, weight_offset, (uint64_t)width * 4) ||
         !muse_tensor(&b[2], out, (uint64_t)rows * width * 4)) return 0;
+    /* A single SIMD group retains the original reduction; additional threads
+     * only stage inputs and store outputs. Restrict this measured policy to
+     * M5 and the wide vectors that amortize its two threadgroup barriers. */
+    if (!getenv("DS4_METAL_MUSE_NORM_REFERENCE") && width>=4096 && width<=8192 &&
+        ds4_gpu_device_is_m5_apple_silicon() &&
+        (uint64_t)width*4<=g_device.maxThreadgroupMemoryLength) {
+        @autoreleasepool {
+            id<MTLComputePipelineState> pipeline=ds4_gpu_get_pipeline("kernel_muse_input_norm_staged");
+            if (!pipeline) return 0;
+            uint32_t threads=pipeline.maxTotalThreadsPerThreadgroup>=1024?1024:512;
+            if (threads<=pipeline.maxTotalThreadsPerThreadgroup) {
+                int owned=0;id<MTLCommandBuffer> cb=ds4_gpu_command_buffer(&owned);
+                if (!cb) return 0;
+                id<MTLComputeCommandEncoder> enc=ds4_gpu_compute_encoder(cb);
+                if (!enc) return 0;
+                [enc setComputePipelineState:pipeline];
+                [enc setBytes:&a length:sizeof(a) atIndex:0];
+                for (unsigned i=0;i<3;i++) [enc setBuffer:b[i].buf offset:b[i].off atIndex:i+1];
+                [enc setThreadgroupMemoryLength:(width*4+15)/16*16 atIndex:0];
+                [enc dispatchThreadgroups:MTLSizeMake(rows,1,1)
+                    threadsPerThreadgroup:MTLSizeMake(threads,1,1)];
+                ds4_gpu_end_compute_encoder(cb,enc);
+                return ds4_gpu_finish_command_buffer(cb,owned,"Muse staged input normalization");
+            }
+        }
+    }
     return muse_dispatch(getenv("DS4_METAL_MUSE_NORM_REFERENCE")?
         "kernel_muse_input_norm":"kernel_muse_input_norm_unroll",
         &a,sizeof(a),b,3,MTLSizeMake(rows,1,1));

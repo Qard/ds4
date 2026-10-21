@@ -141,5 +141,6 @@ __pycache__/
 tests/test_muse_checkpoint_trace
 
 tests/test_muse_projections
+tests/test_muse_norm
 
 tests/test_muse_timeline

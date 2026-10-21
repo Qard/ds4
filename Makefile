@@ -1347,7 +1347,7 @@ ds4_cpu_test_hooks.o ds4_cuda_test_hooks.o tests/test_session_state.o \
 tests/test_session_state_gpu.o: ds4_tool_text.h
 
 clean:
-	rm -f tests/test_muse_timeline tests/test_muse_checkpoint_trace tests/test_muse_cli tests/test_muse_native_live tests/test_muse_metal tests/test_muse_gguf tests/test_muse_attention tests/test_muse_experts tests/test_muse_projections tests/test_muse_graph tests/test_muse_tokenizer tests/test_muse_session tests/test_muse_memory tests/test_muse_chat tests/test_muse_decode tests/test_muse_server tests/test_muse_agent tests/test_muse_eval tests/test_muse_quant
+	rm -f tests/test_muse_norm tests/test_muse_timeline tests/test_muse_checkpoint_trace tests/test_muse_cli tests/test_muse_native_live tests/test_muse_metal tests/test_muse_gguf tests/test_muse_attention tests/test_muse_experts tests/test_muse_projections tests/test_muse_graph tests/test_muse_tokenizer tests/test_muse_session tests/test_muse_memory tests/test_muse_chat tests/test_muse_decode tests/test_muse_server tests/test_muse_agent tests/test_muse_eval tests/test_muse_quant
 	rm -f tests/test_mmvq_cuda tests/test_mmvq_rocm
 	rm -f tests/test_qwen4_ngrams
 	rm -f tests/test_qwen4_ngram_state
@@ -1460,6 +1460,13 @@ test-muse-timeline: tests/test_muse_timeline
 .PHONY: test-muse-experts
 test-muse-experts: tests/test_muse_experts
 	./tests/test_muse_experts
+
+tests/test_muse_norm: tests/test_muse_norm.c ds4_muse_gpu.h $(CORE_OBJS)
+	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $< $(CORE_OBJS) $(METAL_LDLIBS)
+
+.PHONY: test-muse-norm
+test-muse-norm: tests/test_muse_norm
+	./tests/test_muse_norm
 
 tests/test_muse_projections: tests/test_muse_projections.c ds4_muse_gpu.h $(CORE_OBJS)
 	$(CC) $(filter-out -ffast-math,$(CFLAGS)) -I. -o $@ $< $(CORE_OBJS) $(METAL_LDLIBS)

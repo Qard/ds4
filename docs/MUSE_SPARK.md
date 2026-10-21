@@ -1153,3 +1153,33 @@ RoPE outputs to isolate the dot/softmax error from CPU/GPU angle rounding.
 The original end-to-end RoPE checks and the 3e-5 attention bound are retained;
 stress errors for both profiles remain below 2.2e-6 on the tested global and
 sliding cases.
+
+
+Wide gain-before-RMS normalization now stages weighted inputs and spreads
+final stores across a threadgroup on M5. One SIMD group retains the original
+per-lane serial FMA chain and SIMD reduction. The measured policy applies only
+to widths 4096 through 8192, uses 1024 threads (512 if that is the pipeline
+limit), and checks shared-memory capacity before dispatch. Other shapes and
+devices retain the existing path. `DS4_METAL_MUSE_NORM_REFERENCE=1` selects the
+original scalar reference. No math-profile or checkpoint-tag change is needed.
+
+The isolated 8192-wide single-row operation took 13.81 us versus 21.82 us,
+while the alternating full-model 8K comparison measured 5.5308 versus 5.4572
+tokens/s: +1.35%, with a within-run 95% block-bootstrap interval of 0.48–2.21%.
+All 213,564,736 logits and 1056 selected IDs were bit-identical. The run took
+400.87 seconds, peaked at 77.05 GiB RSS across 21 samples, and recorded no new
+system swapouts. Both variants slowed as GPU clocks fell during the run;
+these totals do not establish a stable sustained rate or the 10 tokens/s target.
+Automatic power mode and the reported 65 W AC source were recorded before
+and after this run. The charger observation alone does not establish a cause.
+
+`make test-muse-norm` compares the optimized path with the scalar reference
+bit-for-bit, including zero/subnormal and large finite inputs, irregular-width
+fallbacks, in-place operation, offset views with NaN guards, owned and batched
+commands, and an independent FP64 numerical check. Private component checks
+also cover 8- and 33-row operation and both 512- and 1024-thread schedules.
+
+Further strict FP32 matrix experiments retained the numerical bounds but
+failed to improve single-token decoding. Supported partial eight-column tiles
+were slower, and decoding weights into cooperative input fragments was much
+slower. Their layouts and kernels are not runtime policies.
