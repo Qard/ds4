@@ -829,3 +829,36 @@ The uncertainty estimate resamples 16-step blocks with a fixed seed and 10,000
 replicates; it does not promise the same gain under different hardware
 conditions. Focused quantization, experts, complete graph, sessions, memory,
 and 8193-token attention checks pass, and all native binaries build.
+
+
+A bounded IQ2 lookup-table staging experiment preserved every intermediate
+bit but improved only about 2–3% over the comparable constant-table kernels;
+it is not retained. A separate isolation test uses the same native kernels,
+cache buffers, weights, and argument layout across 12 rotated rounds of 16
+repetitions. Full expert preparation measured 0.4684 ms/call, prebound resources
+with the same per-call submissions measured 0.4388 ms, and prebound dispatches
+in one batch measured 0.2944 ms. This bounds preparation overhead at about
+30 microseconds and attributes about 144 microseconds to the different
+submission schedule in that cache-hot synthetic workload. It is not a native
+model speedup estimate, and does not establish the cause of lower long-run GPU
+clocks. No new cache planner or GPU rendezvous mechanism is introduced.
+
+
+On `ad97c58`, the same standalone fixed-cache protocol completed in 821.76
+seconds. All four prompt frontiers, totaling 808,192 float32 logits, matched
+the normalization baseline bit-for-bit. Forty-two memory samples peaked at
+69.52 GiB RSS; the system swapout counter did not increase. The current CSV
+records this completed sweep:
+
+| Context | Prefill tokens/s | Decode tokens/s |
+| ---: | ---: | ---: |
+| 2048 | 14.75 | 5.11 |
+| 4096 | 11.46 | 4.50 |
+| 6144 | 10.86 | 4.48 |
+| 8192 | 10.67 | 4.38 |
+
+The earlier normalization sweep remains documented above, including its
+4.89 tokens/s result at 8K. These separate sweeps show stronger prefill but
+no consistent decode gain across hardware conditions. They do not invalidate
+the within-run exact IQ2 pair comparison, and that paired improvement does
+not imply the standalone 10 tokens/s goal has been reached.
