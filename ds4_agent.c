@@ -9989,12 +9989,35 @@ static void agent_compact_append_summary_prefix(ds4_engine *engine, ds4_tokens *
         ds4_tokenize_rendered_chat(engine," to=user<|message|>",tokens);
 }
 
+static int agent_compact_summary_boundary(ds4_engine *engine,const ds4_tokens *source,int bottom) {
+    if (!ds4_engine_is_muse(engine)) return bottom;
+    int start=agent_special_token_id(engine,"<|start|>");
+    int body=agent_special_token_id(engine,"<|message|>");
+    int eot=agent_special_token_id(engine,"<|eot|>"),eom=agent_special_token_id(engine,"<|eom|>");
+    /* Keep a cut recipient header entirely in the unsummarized tail. */
+    for (int i=bottom-1;i>=0;i--) {
+        int token=source->v[i];
+        if (token==body || token==eot || token==eom) break;
+        if (token==start) return i;
+    }
+    return bottom;
+}
+
+static void agent_compact_append_summary_separator(ds4_engine *engine,ds4_tokens *tokens) {
+    if (!ds4_engine_is_muse(engine) || !tokens->len) return;
+    int eot=agent_special_token_id(engine,"<|eot|>"),eom=agent_special_token_id(engine,"<|eom|>");
+    int last=tokens->v[tokens->len-1];
+    /* The bounded source may end inside a user body or private planning.
+     * Close that message before opening the internal compaction request. */
+    if (last!=eot && last!=eom) ds4_tokens_push(tokens,eot);
+}
+
 static int agent_compact_reserve_tokens(agent_worker *w) {
     char *text = agent_compact_make_prompt("context pressure before continuing the current task");
     ds4_tokens tokens = {0};
     ds4_chat_append_message(w->engine, &tokens, "user", text);
     agent_compact_append_summary_prefix(w->engine, &tokens);
-    int reserve = tokens.len + 64 +
+    int reserve = tokens.len + 64 + (ds4_engine_is_muse(w->engine) ? 1 : 0) +
                   agent_compact_summary_budget(agent_worker_effective_ctx_size(w));
     free(text);
     ds4_tokens_free(&tokens);
@@ -10044,10 +10067,12 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
     const int ctx = agent_worker_effective_ctx_size(w);
     int summary_budget = agent_compact_summary_budget(ctx);
     int summary_bottom = bottom;
-    if (summary_bottom > ctx - summary_suffix.len - summary_budget - 1)
-        summary_bottom = ctx - summary_suffix.len - summary_budget - 1;
+    /* A Muse source cut can need one closing token before the new user turn. */
+    int summary_limit=ctx-summary_suffix.len-summary_budget-1-(ds4_engine_is_muse(w->engine) ? 1 : 0);
+    if (summary_bottom > summary_limit) summary_bottom=summary_limit;
     summary_bottom = agent_compact_image_boundary(w->images, w->image_count,
                         ds4_engine_is_glm_dsa(w->engine), summary_bottom);
+    summary_bottom=agent_compact_summary_boundary(w->engine,&w->transcript,summary_bottom);
     if (summary_bottom <= sys.len) {
         snprintf(err, err_len, "context too small to summarize this conversation; use a larger --ctx");
         ds4_tokens_free(&summary_suffix);
@@ -10059,6 +10084,7 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
      * prefix and retain EVERY unsummarized token verbatim in the new tail. */
     ds4_tokens prompt = {0};
     agent_tokens_append_range(&prompt, &w->transcript, 0, summary_bottom);
+    agent_compact_append_summary_separator(w->engine,&prompt);
     agent_tokens_append_range(&prompt, &summary_suffix, 0, summary_suffix.len);
     ds4_tokens_free(&summary_suffix);
     size_t summary_images = 0;

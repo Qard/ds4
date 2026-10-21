@@ -112,6 +112,38 @@ static void test_compaction_progress(void) {
     AGENT_TEST_ASSERT(strstr(text,"COMPACTING summary 12 tokens")!=NULL);
 }
 
+static bool valid_muse_message_frames(ds4_engine *engine,const ds4_tokens *tokens) {
+    int start=agent_special_token_id(engine,"<|start|>");
+    int message=agent_special_token_id(engine,"<|message|>");
+    int eot=agent_special_token_id(engine,"<|eot|>"),eom=agent_special_token_id(engine,"<|eom|>");
+    int state=0;
+    for(int i=0;i<tokens->len;i++) {
+        int token=tokens->v[i];
+        if(token==start) {if(state) return false;state=1;}
+        else if(token==message) {if(state!=1) return false;state=2;}
+        else if(token==eot || token==eom) {if(state!=2) return false;state=0;}
+    }
+    return state==2; /* The final summary body is open for generation. */
+}
+static void test_compaction_cut_framing(agent_worker *w) {
+    ds4_tokens source={0};ds4_chat_append_message(w->engine,&source,"system","System.");
+    int system=source.len;
+    ds4_chat_append_message(w->engine,&source,"user","Durable recovery code.");
+    ds4_tokenize_rendered_chat(w->engine,"<|start|>assistant to=self<|message|>Private work.<|eom|>"
+        "<|start|>assistant to=user<|message|>Answer.<|eot|>",&source);
+    for(int cut=system+1;cut<=source.len;cut++) {
+        ds4_tokens prompt={0};int boundary=agent_compact_summary_boundary(w->engine,&source,cut);
+        AGENT_TEST_ASSERT(boundary<=cut && boundary>=system);
+        agent_tokens_append_range(&prompt,&source,0,boundary);
+        agent_compact_append_summary_separator(w->engine,&prompt);
+        ds4_chat_append_message(w->engine,&prompt,"user","Internal summary request.");
+        agent_compact_append_summary_prefix(w->engine,&prompt);
+        AGENT_TEST_ASSERT(valid_muse_message_frames(w->engine,&prompt));
+        ds4_tokens_free(&prompt);
+    }
+    ds4_tokens_free(&source);
+}
+
 static void test_compaction_summary_prefix(agent_worker *w) {
     ds4_tokens tokens={0};
     ds4_chat_append_message(w->engine,&tokens,"user","Summarize task state.");
@@ -180,6 +212,7 @@ int main(int argc, char **argv) {
     test_tail_boundary(&w);
     test_compaction_progress();
     test_compaction_summary_prefix(&w);
+    test_compaction_cut_framing(&w);
     test_resume_prefix(&w);
     free(w.out);
     ds4_engine_close(w.engine);pthread_mutex_destroy(&w.mu);

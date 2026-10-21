@@ -445,4 +445,11 @@ system-wide counter and does not identify the process responsible.
 The independent durable-state fixture places a fresh random recovery code
 early in the conversation, beyond the retained tail. It requires that exact
 code in the actual compaction-summary record, then asks the agent to use the
-remembered code in a file without repeating it. Its live 8K run is pending.
+remembered code in a file without repeating it. Its first live 8K run failed:
+the summary acknowledged compaction but omitted the early code. This uncovered
+a framing defect: a bounded source cut inside a Muse message was followed by a
+new user header without closing the cut message. The adapter now closes that
+body before the internal request, keeps incomplete recipient headers entirely
+in the retained tail, and reserves space for the possible closing token.
+Every token cut through user/assistant headers and bodies has a framing
+regression. Native revalidation reuses the failed canary code; it is pending.

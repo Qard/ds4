@@ -43,6 +43,7 @@ parser.add_argument("--require-compaction-cache", action="store_true",
                     help="Muse: require the compaction rebuild to reuse its complete system prefix")
 parser.add_argument("--durable-state", action="store_true",
                     help="Require an early random fact to survive in the summary and a later tool result")
+parser.add_argument("--durable-state-code", help="Replay a prior RECOVERY_ code for a controlled validation rerun")
 parser.add_argument("--model-family", choices=("legacy", "muse"), default="legacy")
 parser.add_argument("--prefill-chunk", type=int)
 parser.add_argument("--cache-experts", type=int)
@@ -53,6 +54,8 @@ if args.require_compaction_cache and (args.interrupt_only or args.model_family!=
     parser.error("--require-compaction-cache requires a Muse compaction run")
 if args.durable_state and args.interrupt_only:
     parser.error("--durable-state requires a compaction run")
+if args.durable_state_code and (not args.durable_state or not re.fullmatch(r"RECOVERY_[0-9a-f]{32}",args.durable_state_code)):
+    parser.error("--durable-state-code requires --durable-state and a RECOVERY_ code with 32 lowercase hex digits")
 if not math.isfinite(args.temperature) or args.temperature<0 or args.timeout <= 0 or (args.prefill_chunk is not None and args.prefill_chunk <= 0) or (args.cache_experts is not None and args.cache_experts <= 0):
     parser.error("timeouts and optional cache/prefill sizes must be positive")
 root = args.binary.resolve().parent
@@ -201,7 +204,7 @@ try:
         assert (project / "after-interrupt.txt").read_text().strip() == "AFTER_INTERRUPT"
         print("PASS: interrupted generation and same-session tool recovery", flush=True)
         sys.exit(0)
-    durable_code='RECOVERY_'+uuid.uuid4().hex if args.durable_state else None
+    durable_code=(args.durable_state_code or 'RECOVERY_'+uuid.uuid4().hex) if args.durable_state else None
     durable_text=('Durable project state: the recovery code is '+durable_code+
                   '. Preserve this exact code through context compaction; it will be needed later.\n') if durable_code else ''
     if durable_code:
