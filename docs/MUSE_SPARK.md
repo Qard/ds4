@@ -749,3 +749,17 @@ a gain; its grouped pass timings ranged from 28.74 to 71.27 seconds. Both runs
 are retained in the validation artifacts. Hardware variation makes a single
 pass unreliable. These are prefill results, not evidence of reaching the
 10 tokens/s sustained decode target.
+
+
+Further single-token IQ2 experiments were rejected: two- and four-block
+unrolling initially measured about 5% faster but the gain did not repeat;
+eight-block unrolling was about 30% slower. Replacing the sign lookup with its
+exact parity formula was also slower. All retained raw-bit comparisons passed;
+these experiments introduce no production kernel changes.
+
+The existing decode A/B benchmark can emit its actual prefix and evaluated
+input token IDs with `DS4_METAL_DECODE_BENCH_TOKEN_TRACE=1`. This diagnostic is
+outside timed evaluation and selection. It allows prefix-copy hit rates to be
+measured before adding stateful lookahead. It does not change sampling or model
+execution. Saved prefixes remain usable through `--load-prefix` for subsequent
+native decode experiments.

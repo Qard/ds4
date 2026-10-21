@@ -537,6 +537,14 @@ int main(int argc, char **argv) {
 
     const int eos = ds4_token_eos(engine);
     const int total_steps = cfg.warmup + cfg.measured;
+    /* Optional untimed trace for measuring exact prefix-copy opportunities.
+     * It records actual inputs already verified equal across both sessions. */
+    const bool token_trace=getenv("DS4_METAL_DECODE_BENCH_TOKEN_TRACE")!=NULL;
+    if(token_trace) {
+        fputs("trace_prefix_tokens=[",stderr);
+        for(int i=0;i<prefix.len;i++) fprintf(stderr,"%s%d",i?",":"",prefix.v[i]);
+        fputs("]\n",stderr);
+    }
     for (int step = 0; step < total_steps; step++) {
         int token = -1;
         int selected[VARIANT_COUNT] = {-1, -1};
@@ -552,6 +560,7 @@ int main(int argc, char **argv) {
         }
         exact_rows++;
         exact_floats += (size_t)vocab;
+        if(token_trace) fprintf(stderr,"trace_decode_token step=%d token=%d\n",step,token);
 
         /*
          * Even steps evaluate the control on session 0, then the candidate on

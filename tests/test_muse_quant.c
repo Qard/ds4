@@ -133,7 +133,7 @@ int main(int argc,char **argv) {
            (argc==4&&(!argv[3][0]||strchr(argv[3],'=')))) {
             fprintf(stderr,"usage: %s [--bench-experts|--bench-experts-decode [MIN_SPEEDUP [REFERENCE_ENV]]]\n",argv[0]);return 2;
         }
-        return bench_experts(minimum,argc==4?argv[3]:decode_only?"DS4_METAL_MUSE_IQ2_REFERENCE":"DS4_METAL_MUSE_EXPERT_BATCH_REFERENCE",decode_only);
+        return bench_experts(minimum,argc==4?argv[3]:"DS4_METAL_MUSE_EXPERT_BATCH_REFERENCE",decode_only);
     }
     enum {D=256,F=256,E=4,S=2,T=5,ROW=66,BANK=E*F*ROW,SIZE=3*BANK+D*4};
     FILE *file=tmpfile();assert(file && !ftruncate(fileno(file),SIZE));
