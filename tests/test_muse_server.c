@@ -186,4 +186,55 @@ static void test_muse_grouped_tool_replay(ds4_engine *engine) {
     check_muse_grouped_tool_replay(engine,"<atem:function_calls><atem:invoke name=\"bash\"></atem:invoke></atem:function_calls><atem:function_calls><atem:invoke name=\"read\"></atem:invoke></atem:function_calls>",false);
 }
 
-int main(int argc,char **argv) {assert(argc==2);ds4_engine *engine=ds4_test_muse_tokenizer_engine(argv[1]);test_muse_grouped_tool_replay(engine);test_muse_literal_tool_channels(engine);test_muse_anthropic_schema();test_muse_sampling();test_muse_model_listing(engine);test_muse_hidden_reasoning_stream();test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();ds4_engine_close(engine);puts("Muse server prompt, model listing and ATEM roundtrip: PASS");}
+static void test_muse_tool_result_order(void) {
+    tool_call cv[2]={{.id="call_left",.name="lookup",.arguments="{\"key\":\"left\"}"},
+                     {.id="call_right",.name="lookup",.arguments="{\"key\":\"right\"}"}};
+    chat_msg mv[3]={{.role="assistant",.calls={.v=cv,.len=2}},
+                   {.role="tool",.tool_call_id="call_right",.content="RIGHT_RESULT"},
+                   {.role="tool",.tool_call_id="call_left",.content="LEFT_RESULT"}};
+    chat_msgs msgs={.v=mv,.len=3};
+    for(int live=0;live<2;live++) {
+        char *text=live?render_live_tool_tail_for_syntax(SERVER_MODEL_SYNTAX_MUSE,&msgs,1,NULL,DS4_THINK_NONE):
+                        render_chat_prompt_text_for_syntax(SERVER_MODEL_SYNTAX_MUSE,&msgs,NULL,NULL,DS4_THINK_NONE);
+        char *left=strstr(text,"LEFT_RESULT"),*right=strstr(text,"RIGHT_RESULT");
+        assert(left && right && left<right);free(text);
+    }
+}
+
+extern ds4_session *ds4_test_muse_empty_session(void);
+static void test_muse_live_tool_bindings(void) {
+    server s={0}; server_slot slot={0}; s.slots=&slot;s.slot_count=1;
+    pthread_mutex_init(&s.tool_mu,NULL);slot.session=ds4_test_muse_empty_session();
+    tool_call cv[2]={{.id="left",.name="lookup_left"},{.id="right",.name="lookup_right"}};
+    tool_calls calls={.v=cv,.len=2};
+    chat_msg mv[2]={{.role="tool",.tool_call_id="right",.content="RIGHT_RESULT"},
+                    {.role="tool",.tool_call_id="left",.content="LEFT_RESULT"}};
+    chat_msgs msgs={.v=mv,.len=2};stop_list ids={0};
+    id_list_push_unique(&ids,"right");id_list_push_unique(&ids,"left");
+    for(int api=0;api<2;api++) {
+        request r={0};r.api=api?API_RESPONSES:API_ANTHROPIC;
+        r.model_syntax=SERVER_MODEL_SYNTAX_MUSE;r.think_mode=DS4_THINK_NONE;
+        if(api) responses_live_remember(&s,&slot,"visible",&calls,&r);
+        else anthropic_live_remember(&s,&slot,&calls);
+        char *text=render_request_live_tool_tail(&s,&r,&msgs,0,&ids);
+        assert(strstr(text,"tool lookup_left<|message|>"));
+        assert(strstr(text,"tool lookup_right<|message|>"));
+        assert(strstr(text,"LEFT_RESULT")<strstr(text,"RIGHT_RESULT"));free(text);
+        live_tool_state_free(api?&slot.responses_live:&slot.anthropic_live);
+    }
+    id_list_free(&ids);free(slot.session);pthread_mutex_destroy(&s.tool_mu);
+}
+static void test_muse_nearest_tool_name(void) {
+    tool_call first={.id="reused",.name="first",.arguments="{}"};
+    tool_call later={.id="reused",.name="later",.arguments="{}"};
+    chat_msg mv[4]={{.role="assistant",.calls={.v=&first,.len=1}},
+        {.role="tool",.tool_call_id="reused",.content="OLD_RESULT"},
+        {.role="assistant",.calls={.v=&later,.len=1}},
+        {.role="tool",.tool_call_id="reused",.content="NEW_RESULT"}};
+    chat_msgs msgs={.v=mv,.len=4};
+    char *text=render_chat_prompt_text_for_syntax(SERVER_MODEL_SYNTAX_MUSE,&msgs,NULL,NULL,DS4_THINK_NONE);
+    assert(strstr(text,"tool first<|message|><tool_output name=\"first\">\nOLD_RESULT"));
+    assert(strstr(text,"tool later<|message|><tool_output name=\"later\">\nNEW_RESULT"));free(text);
+}
+
+int main(int argc,char **argv) {assert(argc==2);ds4_engine *engine=ds4_test_muse_tokenizer_engine(argv[1]);test_muse_tool_result_order();test_muse_live_tool_bindings();test_muse_nearest_tool_name();test_muse_grouped_tool_replay(engine);test_muse_literal_tool_channels(engine);test_muse_anthropic_schema();test_muse_sampling();test_muse_model_listing(engine);test_muse_hidden_reasoning_stream();test_muse_render();test_muse_tool_roundtrip();test_muse_stream();test_muse_suffixes();test_muse_semantic_sse();ds4_engine_close(engine);puts("Muse server prompt, model listing and ATEM roundtrip: PASS");}

@@ -77,11 +77,13 @@ static void append_muse_tool_calls(buf *out,const tool_calls *calls) {
 static void muse_message_open(buf *out,const char *header) {
     buf_puts(out,"<|start|>");buf_puts(out,header);buf_puts(out,"<|message|>");
 }
-static const char *muse_tool_name(const chat_msgs *msgs,const char *id) {
-    for(int i=msgs?msgs->len-1:-1;i>=0;i--) for(int j=0;j<msgs->v[i].calls.len;j++) {
+static const char *muse_tool_name(const chat_msgs *msgs,int before,const tool_calls *initial,const char *id) {
+    for(int i=msgs?before-1:-1;i>=0;i--) for(int j=0;j<msgs->v[i].calls.len;j++) {
         const tool_call *tc=&msgs->v[i].calls.v[j];
         if(id && tc->id && !strcmp(tc->id,id)) return tc->name;
     }
+    for(int j=0;initial && j<initial->len;j++)
+        if(id && initial->v[j].id && !strcmp(initial->v[j].id,id)) return initial->v[j].name;
     return id && id[0]?id:"tool";
 }
 static void append_muse_assistant(buf *out,const chat_msg *m,bool same_role) {
@@ -110,9 +112,13 @@ static void append_muse_assistant(buf *out,const chat_msg *m,bool same_role) {
         muse_message_open(out,"assistant to=user");append_muse_text(out,content);buf_puts(out,"<|eot|>");
     }
 }
-static char *render_muse_chat(const chat_msgs *source,int start,const char *schemas,ds4_think_mode mode,bool live_tail) {
+static char *render_muse_chat(const chat_msgs *source,int start,const char *schemas,ds4_think_mode mode,bool live_tail,const tool_calls *initial) {
     buf out={0};chat_msgs fragments={0};chat_msgs views=ds41_message_views(source,&fragments,&start);
     const chat_msgs *msgs=&views;
+    stop_list order={0};
+    for(int j=0;initial && j<initial->len;j++) id_list_push_unique(&order,initial->v[j].id);
+    const chat_msg **ordered=order_tool_result_messages(msgs,&order);
+    id_list_free(&order);
     if(live_tail) buf_puts(&out,"<|eot|>");
     else {
         const char *system=NULL;
@@ -123,16 +129,16 @@ static char *render_muse_chat(const chat_msgs *source,int start,const char *sche
         free(text);free(tools);buf_free(&recipients);
     }
     for(int i=start;i<msgs->len;i++) {
-        const chat_msg *m=&msgs->v[i];const char *role=m->role?m->role:"user";
-        if(!strcmp(role,"assistant")) {append_muse_assistant(&out,m,i+1<msgs->len && !strcmp(msgs->v[i+1].role,"assistant"));continue;}
+        const chat_msg *m=ordered[i];const char *role=m->role?m->role:"user";
+        if(!strcmp(role,"assistant")) {append_muse_assistant(&out,m,i+1<msgs->len && !strcmp(ordered[i+1]->role,"assistant"));continue;}
         if(!strcmp(role,"tool") || !strcmp(role,"function")) {
-            const char *name=muse_tool_name(source,m->tool_call_id);
+            const char *name=muse_tool_name(msgs,i,initial,m->tool_call_id);
             buf_puts(&out,"<|start|>tool ");append_muse_header_text(&out,name);buf_puts(&out,"<|message|><tool_output name=\"");
             append_muse_attr(&out,name);buf_puts(&out,"\">\n");append_muse_text(&out,m->content);buf_puts(&out,"\n</tool_output><|eot|>");
         } else {muse_message_open(&out,role_is_system(role)?role:"user");append_muse_text(&out,m->content);buf_puts(&out,"<|eot|>");}
     }
     buf_puts(&out,"<|start|>assistant");
-    free(views.v);chat_msgs_free(&fragments);return buf_take(&out);
+    free(ordered);free(views.v);chat_msgs_free(&fragments);return buf_take(&out);
 }
 
 static char *build_muse_assistant_suffix(const char *content,

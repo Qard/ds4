@@ -8,3 +8,5 @@ ds4_engine *ds4_test_muse_tokenizer_engine(const char *path) {
     vocab_load(&e->vocab, &e->model);
     return e;
 }
+
+ds4_session *ds4_test_muse_empty_session(void) { return xcalloc(1,sizeof(ds4_session)); }

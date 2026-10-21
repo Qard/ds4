@@ -795,6 +795,7 @@ static void id_list_free(stop_list *ids);
 static bool responses_live_has_call_id(server *s, const char *id);
 static bool anthropic_live_has_call_id(server *s, const char *id);
 static stop_list live_tool_call_order(server *s, api_style api, const stop_list *ids);
+static tool_calls live_tool_call_bindings(server *s, api_style api, const stop_list *ids);
 
 typedef struct {
     req_kind kind;
@@ -3298,7 +3299,7 @@ static char *render_glm_chat_prompt_text(const chat_msgs *msgs,
 typedef struct {
     const chat_msg *msg;
     size_t order, position;
-} ds41_tool_result_order;
+} tool_result_order;
 
 /* Most views borrow the original message. Only split Anthropic blocks own
  * strings, kept in fragments so the source history and image list stay intact. */
@@ -3337,18 +3338,18 @@ static chat_msgs ds41_message_views(const chat_msgs *msgs, chat_msgs *fragments,
     return views;
 }
 
-static int ds41_compare_tool_results(const void *a, const void *b) {
-    const ds41_tool_result_order *x = a, *y = b;
+static int compare_tool_results(const void *a, const void *b) {
+    const tool_result_order *x = a, *y = b;
     if (x->order != y->order) return x->order < y->order ? -1 : 1;
     return (x->position > y->position) - (x->position < y->position);
 }
 
-/* Parallel tool replies can arrive out of order. V4.1 renders them in
+/* Parallel tool replies can arrive out of order. Render them in
  * call order within each merged user turn, leaving ordinary text in place. */
-static const chat_msg **ds41_order_messages(const chat_msgs *msgs, const stop_list *initial_order) {
+static const chat_msg **order_tool_result_messages(const chat_msgs *msgs, const stop_list *initial_order) {
     if (!msgs || !msgs->len) return NULL;
     const chat_msg **ordered = xmalloc((size_t)msgs->len * sizeof(*ordered));
-    ds41_tool_result_order *results = xmalloc((size_t)msgs->len * sizeof(*results));
+    tool_result_order *results = xmalloc((size_t)msgs->len * sizeof(*results));
     rax *order = raxNew();
     for (int i = 0; initial_order && i < initial_order->len; i++) {
         const char *id = initial_order->v[i];
@@ -3374,13 +3375,13 @@ static const chat_msg **ds41_order_messages(const chat_msgs *msgs, const stop_li
             if (strcmp(m->role, "user")) {
                 const char *id = m->tool_call_id;
                 void *rank = id ? raxFind(order, (unsigned char *)id, strlen(id)) : raxNotFound;
-                results[count++] = (ds41_tool_result_order){.msg = m,
+                results[count++] = (tool_result_order){.msg = m,
                     .order = rank == raxNotFound ? 0 : (uintptr_t)rank - 1,
                     .position = (size_t)i};
             }
             i++;
         }
-        qsort(results, count, sizeof(*results), ds41_compare_tool_results);
+        qsort(results, count, sizeof(*results), compare_tool_results);
         size_t next = 0;
         for (int j = begin; j < i; j++)
             if (strcmp(msgs->v[j].role, "user")) ordered[j] = results[next++].msg;
@@ -3400,7 +3401,7 @@ static char *render_deepseek41_chat_ordered(const chat_msgs *msgs, int start,
     chat_msgs fragments = {0};
     chat_msgs views = ds41_message_views(msgs, &fragments, &start);
     msgs = &views;
-    const chat_msg **ordered = ds41_order_messages(msgs, initial_order);
+    const chat_msg **ordered = order_tool_result_messages(msgs, initial_order);
     const bool think = ds4_think_mode_enabled(mode);
     const bool keep_reasoning = live_tail || chat_history_uses_tool_context(msgs, tool_schemas);
     const char *effort = ds4_deepseek41_reasoning_effort_text(mode);
@@ -3649,7 +3650,7 @@ static char *render_chat_prompt_text_for_syntax(server_model_syntax syntax,
                                                 const char *tool_schemas,
                                                 const tool_schema_orders *tool_orders,
                                                 ds4_think_mode think_mode) {
-    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return render_muse_chat(msgs,0,tool_schemas,think_mode,false);
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return render_muse_chat(msgs,0,tool_schemas,think_mode,false,NULL);
     if (syntax == SERVER_MODEL_SYNTAX_GLM) {
         return render_glm_chat_prompt_text(msgs, tool_schemas,
                                            tool_orders, think_mode);
@@ -3876,7 +3877,7 @@ static char *render_live_tool_tail_for_syntax(server_model_syntax syntax,
                                               const chat_msgs *msgs, int start,
                                               const tool_schema_orders *tool_orders,
                                               ds4_think_mode think_mode) {
-    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return render_muse_chat(msgs,start,NULL,think_mode,true);
+    if (syntax == SERVER_MODEL_SYNTAX_MUSE) return render_muse_chat(msgs,start,NULL,think_mode,true,NULL);
     if (syntax == SERVER_MODEL_SYNTAX_GLM) {
         return render_glm_live_tool_tail(msgs, start, tool_orders, think_mode);
     }
@@ -3898,6 +3899,12 @@ static DS4_SERVER_MAYBE_UNUSED char *render_live_tool_tail(
 static char *render_request_live_tool_tail(server *s, const request *r,
                                            const chat_msgs *msgs, int start,
                                            const stop_list *ids) {
+    if (r->model_syntax == SERVER_MODEL_SYNTAX_MUSE) {
+        tool_calls bindings = live_tool_call_bindings(s, r->api, ids);
+        char *text = render_muse_chat(msgs,start,NULL,r->think_mode,true,&bindings);
+        tool_calls_free(&bindings);
+        return text;
+    }
     if (r->model_syntax != SERVER_MODEL_SYNTAX_DEEPSEEK41)
         return render_live_tool_tail_for_syntax(r->model_syntax, msgs, start,
                                                  &r->tool_orders, r->think_mode);
@@ -10039,6 +10046,7 @@ typedef struct {
      * result for these ids is a direct protocol continuation and should not
      * trigger prompt-prefix matching or checkpoint canonicalization. */
     stop_list call_ids;
+    tool_calls call_bindings; /* Owned ID/name metadata at this KV frontier. */
 } live_tool_state;
 
 typedef struct {
@@ -10495,6 +10503,7 @@ static void tool_memory_free(tool_memory *m) {
 static void live_tool_state_clear_locked(live_tool_state *st) {
     if (!st) return;
     stop_list_clear(&st->call_ids);
+    tool_calls_free(&st->call_bindings);
     free(st->visible_text);
     st->visible_text = NULL;
     st->visible_len = 0;
@@ -10549,6 +10558,16 @@ static void thinking_live_remember(server *s, server_slot *slot,
     pthread_mutex_unlock(&s->tool_mu);
 }
 
+static void live_tool_state_remember_calls(live_tool_state *st, const tool_calls *calls) {
+    for (int i=0; calls && i<calls->len; i++) {
+        const tool_call *tc=&calls->v[i];
+        if (!tc->id || !tc->id[0] || id_list_contains(&st->call_ids,tc->id)) continue;
+        id_list_push_unique(&st->call_ids,tc->id);
+        tool_calls_push(&st->call_bindings,(tool_call){.id=xstrdup(tc->id),
+            .name=xstrdup(tc->name ? tc->name : tc->id)});
+    }
+}
+
 static void responses_live_remember(server *s, server_slot *slot,
                                     const char *visible_text,
                                     const tool_calls *calls, const request *req) {
@@ -10560,11 +10579,7 @@ static void responses_live_remember(server *s, server_slot *slot,
     slot->responses_live.visible_text = key;
     slot->responses_live.visible_len = key ? strlen(key) : 0;
     slot->responses_live.images = images;
-    if (calls) {
-        for (int i = 0; i < calls->len; i++) {
-            id_list_push_unique(&slot->responses_live.call_ids, calls->v[i].id);
-        }
-    }
+    live_tool_state_remember_calls(&slot->responses_live,calls);
     slot->responses_live.live_tokens = ds4_session_pos(slot->session);
     slot->responses_live.valid = key != NULL;
     pthread_mutex_unlock(&s->tool_mu);
@@ -10575,9 +10590,7 @@ static void anthropic_live_remember(server *s, server_slot *slot,
     if (!s || !slot || !calls || calls->len == 0) return;
     pthread_mutex_lock(&s->tool_mu);
     live_tool_state_clear_locked(&slot->anthropic_live);
-    for (int i = 0; i < calls->len; i++) {
-        id_list_push_unique(&slot->anthropic_live.call_ids, calls->v[i].id);
-    }
+    live_tool_state_remember_calls(&slot->anthropic_live,calls);
     slot->anthropic_live.live_tokens = ds4_session_pos(slot->session);
     slot->anthropic_live.valid = slot->anthropic_live.call_ids.len > 0;
     pthread_mutex_unlock(&s->tool_mu);
@@ -10645,6 +10658,26 @@ static stop_list live_tool_call_order(server *s, api_style api, const stop_list 
     }
     pthread_mutex_unlock(&s->tool_mu);
     return order;
+}
+
+static tool_calls live_tool_call_bindings(server *s, api_style api, const stop_list *ids) {
+    tool_calls out={0};
+    if (!s || !ids || !ids->len || (api!=API_RESPONSES && api!=API_ANTHROPIC)) return out;
+    pthread_mutex_lock(&s->tool_mu);
+    for (int i=0;i<s->slot_count;i++) {
+        const live_tool_state *st=api==API_RESPONSES ? &s->slots[i].responses_live : &s->slots[i].anthropic_live;
+        if (!st->valid || st->call_ids.len!=ids->len) continue;
+        bool match=true;
+        for (int j=0;j<ids->len && match;j++) match=id_list_contains(&st->call_ids,ids->v[j]);
+        if (!match) continue;
+        for (int j=0;j<st->call_bindings.len;j++) {
+            const tool_call *tc=&st->call_bindings.v[j];
+            tool_calls_push(&out,(tool_call){.id=xstrdup(tc->id),.name=xstrdup(tc->name)});
+        }
+        break;
+    }
+    pthread_mutex_unlock(&s->tool_mu);
+    return out;
 }
 
 static bool responses_live_matches_request_locked(server_slot *slot,
