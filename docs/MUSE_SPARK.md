@@ -810,3 +810,22 @@ repacking is introduced. Disabling existing advisory expert readahead measured
 8.03 versus 8.05 tokens/s, with all 58,391,872 logits exact, so its default is
 unchanged. A diagnostic user-initiated process activity did not prevent the
 long-run slowdown (about 5.2 tokens/s); no activity policy is added to inference.
+
+
+Single-token IQ2 gate/up evaluation now shares input loads between two
+independent original FP32 chains. It keeps the same per-lane values, serial
+FMAs, SIMD sums, and sigmoid gate; it adds no weight bank or scratch tensor.
+The existing backend MoE pair kernels use a different accumulation layout,
+so this specialization preserves Muse's row-dot ordering. A diagnostic
+`DS4_METAL_MUSE_IQ2_PAIR_REFERENCE=1` selects the prior kernel.
+
+The bounded combined-expert measurement improved by about 9.6%, just below
+its exploratory 10% target. A 256-token native comparison measured 8.00 versus
+7.83 tokens/s, but its timing uncertainty included zero. Extending the paired
+comparison to 1024 measured tokens per variant established 5.44 versus 5.25
+tokens/s, about 3.59% faster, with a within-run 95% block-bootstrap interval of
+2.96–4.20%. All 213,564,736 logits and 1,056 selected IDs matched bit-for-bit.
+The uncertainty estimate resamples 16-step blocks with a fixed seed and 10,000
+replicates; it does not promise the same gain under different hardware
+conditions. Focused quantization, experts, complete graph, sessions, memory,
+and 8193-token attention checks pass, and all native binaries build.

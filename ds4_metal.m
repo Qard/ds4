@@ -50908,7 +50908,9 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
                     muse_dispatch_resources_threads("kernel_muse_expert_down_iq2_batch",
                     &batch,sizeof(batch),down_b,5,MTLSizeMake((latent+groups-1)/groups,resource_count,batch.tiles),resources,resource_count,groups);
             } else {
-                if(ok) ok=muse_dispatch_resources("kernel_muse_expert_mid",&a,sizeof(a),b,5,
+                const char *mid_kernel=rows==1&&gate_type==16&&!getenv("DS4_METAL_MUSE_IQ2_PAIR_REFERENCE")?
+                    "kernel_muse_expert_mid_iq2_pair":"kernel_muse_expert_mid";
+                if(ok) ok=muse_dispatch_resources(mid_kernel,&a,sizeof(a),b,5,
                     MTLSizeMake(ff,slots,rows),resources,resource_count);
                 if(ok) ok=muse_dispatch_resources("kernel_muse_expert_down",&a,sizeof(a),down,4,
                     MTLSizeMake(latent,slots,rows),resources,resource_count);

@@ -286,6 +286,53 @@ kernel void kernel_muse_expert_mid(constant muse_expert_args &a,
     if (lane == 0) mid[(size_t(tok)*a.slots+slot)*a.ff+row] = g/(1.f+exp(-g))*u;
 }
 
+/* Gate and up share input loads, but retain independent original serial
+ * FP32 chains and SIMD sums. Existing MoE pair kernels use a different
+ * per-lane layout, so retain the generic row-dot ordering here. */
+static inline float2 muse_iq2_pair_dot(device const char *gate,device const char *up,
+    device const float *input,uint width,ushort lane) {
+    uint sub=lane/4,j=lane%4;float2 acc=0.f;
+#pragma unroll(2)
+    for(uint b=0;b<width/256;b++) {
+        device const uchar *gb=(device const uchar *)(gate+size_t(b)*66);
+        device const uchar *ub=(device const uchar *)(up+size_t(b)*66);
+        device const ushort *gq=(device const ushort *)(gb+2)+4*sub;
+        device const ushort *uq=(device const ushort *)(ub+2)+4*sub;
+        uint gg=uint(gq[0])|(uint(gq[1])<<16),gs=uint(gq[2])|(uint(gq[3])<<16);
+        uint ug=uint(uq[0])|(uint(uq[1])<<16),us=uint(uq[2])|(uint(uq[3])<<16);
+        float gd=float(*(device const half *)gb)*(0.5f+float(gs>>28))*0.25f;
+        float ud=float(*(device const half *)ub)*(0.5f+float(us>>28))*0.25f;
+        constant const uchar *gv=(constant const uchar *)(ds4_metal_iq2xxs_grid+((gg>>(8*j))&255u));
+        constant const uchar *uv=(constant const uchar *)(ds4_metal_iq2xxs_grid+((ug>>(8*j))&255u));
+        uint gsign=ds4_metal_ksigns_iq2xs[(gs>>(7*j))&127u];
+        uint usign=ds4_metal_ksigns_iq2xs[(us>>(7*j))&127u];
+        device const float *x=input+b*256+sub*32+j*8;float2 part=0.f;
+#pragma unroll
+        for(uint i=0;i<8;i++) {
+            float value=x[i];
+            part.x=fma(float(gv[i]),((gsign>>i)&1u)?-value:value,part.x);
+            part.y=fma(float(uv[i]),((usign>>i)&1u)?-value:value,part.y);
+        }
+        acc.x=fma(gd,part.x,acc.x);acc.y=fma(ud,part.y,acc.y);
+    }
+    return float2(simd_sum(acc.x),simd_sum(acc.y));
+}
+
+kernel void kernel_muse_expert_mid_iq2_pair(constant muse_expert_args &a,
+    device const uint64_t *gates, device const uint64_t *ups,
+    device const int *selected, device const float *x, device float *mid,
+    uint3 group [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]]) {
+    uint row = group.x, slot = group.y, tok = group.z;
+    int expert = selected[size_t(tok)*a.slots+slot];
+    if (expert < 0 || uint(expert) >= a.total) return;
+    device const char *gate = reinterpret_cast<device const char *>(gates[expert])+size_t(row)*a.gate_row;
+    device const char *up = reinterpret_cast<device const char *>(ups[expert])+size_t(row)*a.gate_row;
+    device const float *input = x+size_t(tok)*a.latent;
+    float2 pair=muse_iq2_pair_dot(gate,up,input,a.latent,lane);
+    float g=pair.x,u=pair.y;
+    if (lane == 0) mid[(size_t(tok)*a.slots+slot)*a.ff+row] = g/(1.f+exp(-g))*u;
+}
+
 kernel void kernel_muse_expert_down(constant muse_expert_args &a,
     device const uint64_t *downs, device const int *selected,
     device const float *mid, device float *part,
