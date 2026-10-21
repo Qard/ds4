@@ -847,8 +847,8 @@ clocks. No new cache planner or GPU rendezvous mechanism is introduced.
 On `ad97c58`, the same standalone fixed-cache protocol completed in 821.76
 seconds. All four prompt frontiers, totaling 808,192 float32 logits, matched
 the normalization baseline bit-for-bit. Forty-two memory samples peaked at
-69.52 GiB RSS; the system swapout counter did not increase. The current CSV
-records this completed sweep:
+69.52 GiB RSS; the system swapout counter did not increase. The fixed-cache CSV
+`speed-bench/m5_max_muse_ud_iq2_xxs.csv` records this completed sweep:
 
 | Context | Prefill tokens/s | Decode tokens/s |
 | ---: | ---: | ---: |
@@ -972,3 +972,34 @@ batch-consistency contract. An eight-matrix storage comparison (544 MiB of
 actual fixed weights, both variants locked) measured only about a 2.7%
 anonymous-buffer advantage over file-backed views. That result does not
 justify a model-wide copy or an additional resident weight bank.
+
+
+The final standalone default-configuration sweep on `30a4e5f` uses automatic
+cache admission rather than the earlier fixed 4096-expert allowance. On this
+128-GiB M5 Max running macOS 26.6.2 in unchanged Automatic power mode, it selected
+4994 experts (60.35 GiB), with 18.25 GiB of fixed weights and 2.10 GiB reserved
+for its graph. No timing-summary instrumentation was enabled. It follows the
+published Manzoni procedure: continued 2048-token prefill intervals, default
+512-token prefill chunks and 128 greedy decode tokens per frontier.
+
+| Context | Prefill tokens/s | Decode tokens/s |
+| ---: | ---: | ---: |
+| 2048 | 18.86 | 7.88 |
+| 4096 | 13.67 | 5.16 |
+| 6144 | 11.01 | 5.07 |
+| 8192 | 9.90 | 4.52 |
+
+The [automatic-cache CSV](../speed-bench/m5_max_muse_ud_iq2_xxs_auto.csv) records
+this result separately from the earlier fixed-cache CSV. The validation run
+completed in 761.65 seconds, with all 808,192 frontier logits bit-identical to
+the earlier normalization reference. Thirty-nine memory samples peaked at
+80.30 GiB RSS; the system swapout counter did not increase. The final row's
+zero snapshot size reflects that no subsequent prefill needs a saved snapshot,
+not an absent KV cache.
+
+The 4.52 tokens/s result at 8K remains substantially below the 10 tokens/s
+objective. The within-run gains from the three retained optimizations are
+established by separate exact paired tests; they do not erase the sustained
+slowdown or make separate sweeps with different cache allowances and hardware
+histories controlled speedup measurements. No power, fan, sleep, precision or
+weight-storage policy was changed to obtain these results.
