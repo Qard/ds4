@@ -1081,3 +1081,20 @@ that the command buffer reopened by routing readback lacked its own profiling
 attachment. It now records both submissions independently; the regression
 requires two batch records containing the three encoded compute passes.
 Run it with `make test-muse-timeline`. Profiling remains opt-in.
+
+Further exact-only experiments were not retained. Packing independent heads
+into attention threadgroups, preloading multiple keys before the original
+softmax chain, and skipping finite `exp(0)` identities all preserved partial
+and final bits but failed to improve the tested 8K global/sliding kernels
+materially. Expanding real Q6 codes from 210 to 274 or 320 bytes per block
+increased storage and slowed the 8192-by-8192 projection: the best expanded
+variant took 0.147 ms versus 0.121 ms for the existing kernel.
+
+A cache traversal bounded by existing live counts reduced a sparse test's
+average scan from 30,720 slots to 2.1, but its 1024-step full-model comparison
+measured only 5.9929 versus 5.9868 tokens/s: +0.10%, with a within-run 95%
+interval of -0.66–0.85%. All 213,564,736 logits and 1056 selected IDs were exact.
+It was not retained. Avoiding temporary views for unsplit expert batches also
+failed its isolated paired throughput test and was removed. The expert tests
+retain offset input/output views and prefix/suffix guard checks, strengthening
+coverage of the existing path without changing runtime policy.

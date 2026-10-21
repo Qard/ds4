@@ -23,8 +23,17 @@ int main(void) {
     float input[T*D], weights[T*S]={.2f,.8f,.3f,.7f,.4f,.6f};
     int32_t ids[T*S]={0,1,1,2,0,3};
     for (unsigned i=0;i<T*D;i++) input[i]=((int)(i%17)-8)*.0625f;
-    ds4_gpu_tensor *x=ds4_gpu_tensor_alloc(sizeof(input)), *selected=ds4_gpu_tensor_alloc(sizeof(ids));
-    ds4_gpu_tensor *mid=ds4_gpu_tensor_alloc(T*S*F*4), *part=ds4_gpu_tensor_alloc(T*S*D*4);
+    uint64_t payload[4]={sizeof(input),sizeof(ids),T*S*F*4,T*S*D*4};
+    ds4_gpu_tensor *roots[4],*offset_views[4];
+    const uint32_t guard[4]={0xdeadbeef,0x13579bdf,0x2468ace0,0xa5a5a5a5};
+    for(unsigned i=0;i<4;i++) {
+        roots[i]=ds4_gpu_tensor_alloc(payload[i]+32);assert(roots[i]);
+        assert(ds4_gpu_tensor_write(roots[i],0,guard,16));
+        assert(ds4_gpu_tensor_write(roots[i],16+payload[i],guard,16));
+        offset_views[i]=ds4_gpu_tensor_view(roots[i],16,payload[i]);assert(offset_views[i]);
+    }
+    ds4_gpu_tensor *x=offset_views[0],*selected=offset_views[1];
+    ds4_gpu_tensor *mid=offset_views[2],*part=offset_views[3];
     ds4_gpu_tensor *w=ds4_gpu_tensor_alloc(sizeof(weights)), *out=ds4_gpu_tensor_alloc(T*D*4);
     assert(x&&selected&&mid&&part&&w&&out);
     assert(ds4_gpu_tensor_write(x,0,input,sizeof(input)) && ds4_gpu_tensor_write(selected,0,ids,sizeof(ids)));
@@ -145,8 +154,14 @@ int main(void) {
     }
     ds4_gpu_tensor_free(latent_source);
     ds4_gpu_tensor_free(routing);
+    for(unsigned i=0;i<4;i++) {
+        uint32_t actual_guard[4];
+        assert(ds4_gpu_tensor_read(roots[i],0,actual_guard,16)&&!memcmp(actual_guard,guard,16));
+        assert(ds4_gpu_tensor_read(roots[i],16+payload[i],actual_guard,16)&&!memcmp(actual_guard,guard,16));
+    }
     ds4_gpu_tensor_free(x); ds4_gpu_tensor_free(selected); ds4_gpu_tensor_free(mid);
     ds4_gpu_tensor_free(part); ds4_gpu_tensor_free(w); ds4_gpu_tensor_free(out);
+    for(unsigned i=0;i<4;i++) ds4_gpu_tensor_free(roots[i]);
     ds4_gpu_cleanup(); munmap(map,SIZE); fclose(file);
     puts("Muse expert normalization and bounded native SSD cache: PASS");
 }
