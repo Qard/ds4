@@ -50643,7 +50643,10 @@ int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t si
     if(type==8 && in_dim%128==0) {
         return muse_q8_f32_rows(b,in_dim,out_dim,tokens,row_bytes);
     }
-    return muse_dispatch("kernel_muse_linear", &a, sizeof(a), b, 3, MTLSizeMake(out_dim, tokens, 1));
+    /* Diagnostic rollback permits same-engine, exact-logit speed comparisons. */
+    const char *kernel=type==14&&!getenv("DS4_METAL_MUSE_Q6_REFERENCE")?
+        "kernel_muse_linear_q6":"kernel_muse_linear";
+    return muse_dispatch(kernel, &a, sizeof(a), b, 3, MTLSizeMake(out_dim, tokens, 1));
 }
 
 int ds4_gpu_muse_input_norm_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,

@@ -5,14 +5,74 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 
-int main(void) {
+static double bench_seconds(void) {
+    struct timespec ts; assert(!clock_gettime(CLOCK_MONOTONIC,&ts));
+    return ts.tv_sec+ts.tv_nsec*1e-9;
+}
+
+/* Bounded synthetic Q6_K matrices isolate projection work from SSD/cache
+ * effects. Alternate order and require every output bit to match the control. */
+static int bench_linear(const char *rollback_env,double minimum_speedup) {
+    enum {K=8192,N=8192,TMAX=512,ROW=K/256*210};
+    size_t bytes=(size_t)N*ROW;
+    unsigned char *map=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    assert(map!=MAP_FAILED);uint32_t seed=931;
+    for(size_t i=0;i<bytes;i++) {seed=seed*1664525u+1013904223u;map[i]=seed>>24;}
+    for(size_t i=0;i<bytes/210;i++) {uint16_t d=0x1800+i%16;memcpy(map+i*210+208,&d,2);}
+    float *input=malloc((size_t)TMAX*K*4),*reference=malloc((size_t)TMAX*N*4),*actual=malloc((size_t)TMAX*N*4);
+    assert(input&&reference&&actual);
+    for(size_t i=0;i<(size_t)TMAX*K;i++) input[i]=sinf(i*.031f)*.17f;
+    assert(ds4_gpu_init()&&ds4_gpu_set_model_map(map,bytes));
+    ds4_gpu_tensor *x=ds4_gpu_tensor_alloc((size_t)TMAX*K*4),*y=ds4_gpu_tensor_alloc((size_t)TMAX*N*4);
+    assert(x&&y&&ds4_gpu_tensor_write(x,0,input,(size_t)TMAX*K*4));
+    assert(!setenv(rollback_env,"1",1));
+    for(unsigned warm=0;warm<3;warm++)
+        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,TMAX)&&ds4_gpu_synchronize());
+    const unsigned shapes[]={1,16,512};int rc=0;
+    for(unsigned shape=0;shape<3;shape++) {
+        unsigned rows=shapes[shape],reps=rows==512?1:8;double elapsed[2]={0};
+        assert(!setenv(rollback_env,"1",1));
+        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows));
+        assert(ds4_gpu_tensor_read(y,0,reference,(size_t)rows*N*4));
+        for(unsigned round=0;round<6;round++) for(unsigned order=0;order<2;order++) {
+            unsigned variant=(round+order)&1;
+            assert(!(variant?unsetenv(rollback_env):setenv(rollback_env,"1",1)));
+            /* Warm pipeline specialization before the timed batch. */
+            assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows)&&ds4_gpu_synchronize());
+            double start=bench_seconds();assert(ds4_gpu_begin_commands());
+            for(unsigned rep=0;rep<reps;rep++) assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows));
+            assert(ds4_gpu_end_commands());elapsed[variant]+=bench_seconds()-start;
+            assert(ds4_gpu_tensor_read(y,0,actual,(size_t)rows*N*4));
+            if(memcmp(reference,actual,(size_t)rows*N*4)) {fprintf(stderr,"Q6_K linear drift rows=%u variant=%u\n",rows,variant);rc=1;goto done;}
+        }
+        double speedup=elapsed[0]/elapsed[1];
+        printf("Q6_K K=%u N=%u rows=%u rollback=%s control_ms=%.3f candidate_ms=%.3f speedup=%.4f exact=yes\n",K,N,rows,rollback_env,elapsed[0]*1000/(6*reps),elapsed[1]*1000/(6*reps),speedup);fflush(stdout);
+        if(speedup<minimum_speedup) rc=1;
+    }
+done:
+    unsetenv(rollback_env);
+    ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(y);ds4_gpu_cleanup();
+    munmap(map,bytes);free(input);free(reference);free(actual);return rc;
+}
+
+int main(int argc,char **argv) {
+    if(argc>1) {
+
+        char *minimum_end=NULL;double minimum=argc==4?strtod(argv[3],&minimum_end):0;
+        if(argc<3||argc>4||strcmp(argv[1],"--bench-linear")||!argv[2][0]||strchr(argv[2],'=')||!isfinite(minimum)||minimum<0||
+           (argc==4&&(!argv[3][0]||*minimum_end))) {
+            fprintf(stderr,"usage: %s [--bench-linear ROLLBACK_ENV [MIN_SPEEDUP]]\n",argv[0]);return 2;
+        }
+        return bench_linear(argv[2],minimum);
+    }
     assert(ds4_gpu_init());
     const uint64_t map_size = 65536;
     unsigned char *matrix = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     assert(matrix != MAP_FAILED && ds4_gpu_set_model_map(matrix, map_size));
     const unsigned types[] = {0, 8, 30, 14};
-    const unsigned K = 256, N = 16, T = 2;
+    const unsigned K = 256, N = 17, T = 2;
     ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(T * K * sizeof(float));
     ds4_gpu_tensor *y = ds4_gpu_tensor_alloc(T * N * sizeof(float));
     float inputs[T * K], actual[T * N];

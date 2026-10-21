@@ -554,3 +554,32 @@ candidate measurements. Reported selected-expert synchronization time includes
 GPU work before routing readback; it is not SSD read time. Likewise, the overall
 cache-hit percentage includes reuse within prefill batches and is not a decode
 cache-hit measurement.
+
+The first profiling pass attributed 57.5% of decode GPU encoder time and 64.5%
+of prefill GPU encoder time to general linear projections. A SIMD-group packing
+experiment preserved 7,475,776 full-checkpoint logits exactly, but its balanced
+comparison measured 5.53 versus 5.60 tokens/s. That production change was
+discarded. The shared decode comparison now reserves both of its sessions in
+memory admission before sizing the expert cache.
+
+Muse's Q6_K projections now reuse packed bytes and scale metadata within each
+block, preserving each lane's serial FP32 FMA order and the existing SIMD
+reduction. The warmed synthetic 8192-by-8192 comparison measured 2.41x, 3.52x,
+and 3.77x kernel speedups at 1, 16, and 512 input rows, with every output bit
+identical. Reproduce this bounded check without loading a checkpoint:
+
+```sh
+make tests/test_muse_metal
+./tests/test_muse_metal --bench-linear DS4_METAL_MUSE_Q6_REFERENCE 1.5
+```
+
+A balanced full-checkpoint decode comparison measured 7.02 tokens/s with the
+new kernel versus 5.56 with the original, comparing all 7,475,776 logits and
+36 selected IDs exactly. This used a 16-token prefix, four warmup steps, and 32
+measured tokens per variant with two sessions sharing one engine/cache. It is
+not the sustained 8K target. A standalone 512-token prompt measured 10.66 prefill
+and 5.95 decode tokens/s; all 202,048 frontier logits matched the saved original
+prefill exactly. Its admitted expert cache was 54.42 GiB versus 55.37 GiB in the
+earlier 4.58/2.96 observation, so the controlled same-engine comparison is the
+stronger attribution of speedup. Metal, quantization, graph, KV/session, memory,
+and long-attention regressions passed.
