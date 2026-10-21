@@ -72,6 +72,28 @@ kernel void kernel_muse_input_norm(constant muse_norm_args &a,
     }
 }
 
+/* Prefetch four strided values before consuming the serial FMA chain. The
+ * per-lane order and SIMD reduction remain identical to the scalar loop. */
+kernel void kernel_muse_input_norm_unroll(constant muse_norm_args &a,
+    device const float *x,device const float *w,device float *out,
+    uint row [[threadgroup_position_in_grid]],ushort lane [[thread_index_in_simdgroup]]) {
+    if(row>=a.rows) return;
+    size_t base=size_t(row)*a.width;
+    float sum=0;uint i=lane;
+    for(;i+96<a.width;i+=128) {
+        float v0=x[base+i]*w[i],v1=x[base+i+32]*w[i+32];
+        float v2=x[base+i+64]*w[i+64],v3=x[base+i+96]*w[i+96];
+        sum=fma(v0,v0,sum);sum=fma(v1,v1,sum);
+        sum=fma(v2,v2,sum);sum=fma(v3,v3,sum);
+    }
+    for(;i<a.width;i+=32) {float v=x[base+i]*w[i];sum=fma(v,v,sum);}
+    float inv=metal::precise::rsqrt(simd_sum(sum)/a.width+a.eps);
+#pragma unroll(4)
+    for(uint j=lane;j<a.width;j+=32) {
+        float v=x[base+j];v*=w[j];v*=inv;out[base+j]=v;
+    }
+}
+
 struct muse_attention_args {
     uint tokens, heads, kv_heads, dim, pos0, cap, window, rope;
     float rope_base;

@@ -5,7 +5,7 @@
 #include <stdlib.h>
 
 static void check_rows(unsigned T, unsigned cap, unsigned window, bool rope, unsigned tail_rows) {
-    enum { H = 4, KV = 2, D = 64 };
+    enum { H = 16, KV = 2, D = 64 };
     size_t qbytes=(size_t)T*H*D*sizeof(float),kbytes=(size_t)T*KV*D*sizeof(float);
     float *q=malloc(qbytes),*qr=malloc(qbytes),*k=malloc(kbytes),*v=malloc(kbytes),*kr=malloc(kbytes);
     assert(q && qr && k && v && kr);

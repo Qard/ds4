@@ -57,7 +57,55 @@ done:
     munmap(map,bytes);free(input);free(reference);free(actual);return rc;
 }
 
+/* Match the two gain-before-RMS shapes used by each Muse layer. */
+static int bench_input_norm(double minimum) {
+    enum {WIDTH=8192,ROWS=512};size_t bytes=(size_t)WIDTH*ROWS*4;
+    float *input=malloc(bytes),*reference=malloc(bytes),*actual=malloc(bytes);
+    float *weights=mmap(NULL,WIDTH*4,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    assert(input&&reference&&actual&&weights!=MAP_FAILED);
+    for(unsigned i=0;i<WIDTH;i++) weights[i]=.5f+(i%97)*.01f;
+    for(size_t i=0;i<bytes/4;i++) input[i]=sinf(i*.031f)*.17f;
+    assert(ds4_gpu_init()&&ds4_gpu_set_model_map(weights,WIDTH*4));
+    ds4_gpu_tensor *x=ds4_gpu_tensor_alloc(bytes),*y=ds4_gpu_tensor_alloc(bytes);
+    assert(x&&y&&ds4_gpu_tensor_write(x,0,input,bytes));int rc=0;
+    for(unsigned warm=0;warm<3;warm++)
+        assert(ds4_gpu_muse_input_norm_tensor(y,x,weights,WIDTH*4,0,ROWS,WIDTH,1e-5f)&&ds4_gpu_synchronize());
+    const unsigned widths[]={8192,4096,8192},rows[]={1,8,512};
+    for(unsigned shape=0;shape<3;shape++) {
+        unsigned width=widths[shape],count=rows[shape],reps=shape==2?4:128;
+        size_t size=(size_t)width*count*4;double elapsed[2]={0};
+        assert(!setenv("DS4_METAL_MUSE_NORM_REFERENCE","1",1));
+        assert(ds4_gpu_muse_input_norm_tensor(y,x,weights,WIDTH*4,0,count,width,1e-5f));
+        assert(ds4_gpu_tensor_read(y,0,reference,size));
+        for(unsigned round=0;round<6;round++) for(unsigned order=0;order<2;order++) {
+            unsigned variant=(round+order)&1;
+            assert(!(variant?unsetenv("DS4_METAL_MUSE_NORM_REFERENCE"):setenv("DS4_METAL_MUSE_NORM_REFERENCE","1",1)));
+            assert(ds4_gpu_muse_input_norm_tensor(y,x,weights,WIDTH*4,0,count,width,1e-5f)&&ds4_gpu_synchronize());
+            double start=bench_seconds();assert(ds4_gpu_begin_commands());
+            for(unsigned rep=0;rep<reps;rep++) assert(ds4_gpu_muse_input_norm_tensor(y,x,weights,WIDTH*4,0,count,width,1e-5f));
+            assert(ds4_gpu_end_commands());elapsed[variant]+=bench_seconds()-start;
+            assert(ds4_gpu_tensor_read(y,0,actual,size));
+            if(memcmp(reference,actual,size)) {fprintf(stderr,"input norm drift width=%u rows=%u variant=%u\n",width,count,variant);rc=1;goto done;}
+            /* The actual graph uses in-place normalization. */
+            assert(ds4_gpu_tensor_write(y,0,input,size));
+            assert(ds4_gpu_muse_input_norm_tensor(y,y,weights,WIDTH*4,0,count,width,1e-5f));
+            assert(ds4_gpu_tensor_read(y,0,actual,size)&&!memcmp(reference,actual,size));
+        }
+        double speedup=elapsed[0]/elapsed[1];
+        printf("input_norm width=%u rows=%u control_us=%.3f candidate_us=%.3f speedup=%.4f exact=yes inplace=yes\n",width,count,elapsed[0]*1e6/(6*reps),elapsed[1]*1e6/(6*reps),speedup);fflush(stdout);
+        if(shape<2&&speedup<minimum) rc=1;
+    }
+done:
+    unsetenv("DS4_METAL_MUSE_NORM_REFERENCE");ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(y);ds4_gpu_cleanup();
+    munmap(weights,WIDTH*4);free(input);free(reference);free(actual);return rc;
+}
+
 int main(int argc,char **argv) {
+    if(argc>1&&!strcmp(argv[1],"--bench-norm")) {
+        char *end=NULL;double minimum=argc==3?strtod(argv[2],&end):0;
+        if(argc>3||!isfinite(minimum)||minimum<0||(argc==3&&(!argv[2][0]||*end))) return 2;
+        return bench_input_norm(minimum);
+    }
     if(argc>1) {
 
         char *minimum_end=NULL;double minimum=argc==4?strtod(argv[3],&minimum_end):0;
@@ -141,6 +189,28 @@ int main(int argc,char **argv) {
         }
         double inv = 1. / sqrt(ss / K + 1e-8);
         for (unsigned i = 0; i < K; i++) assert(fabs(normed[t * K + i] - inputs[t * K + i] * norms[i] * inv) < 2e-5);
+    }
+    /* Cover unrolled-loop tails and aliasing independently of the large
+     * performance fixture, including widths smaller than one SIMD group. */
+    const unsigned norm_widths[]={1,31,32,33,127,128,129,255,256};
+    for(unsigned shape=0;shape<sizeof(norm_widths)/sizeof(norm_widths[0]);shape++) {
+        unsigned width=norm_widths[shape];float expected[T*K],reference[T*K];
+        for(unsigned t=0;t<T;t++) {
+            double ss=0;
+            for(unsigned i=0;i<width;i++) {double v=inputs[t*width+i]*norms[i];ss+=v*v;}
+            double inv=1./sqrt(ss/width+1e-8);
+            for(unsigned i=0;i<width;i++) expected[t*width+i]=inputs[t*width+i]*norms[i]*inv;
+        }
+        assert(!setenv("DS4_METAL_MUSE_NORM_REFERENCE","1",1));
+        assert(ds4_gpu_muse_input_norm_tensor(n,x,matrix,map_size,32768,T,width,1e-8f));
+        assert(ds4_gpu_tensor_read(n,0,reference,T*width*4));
+        assert(!unsetenv("DS4_METAL_MUSE_NORM_REFERENCE"));
+        assert(ds4_gpu_muse_input_norm_tensor(n,x,matrix,map_size,32768,T,width,1e-8f));
+        assert(ds4_gpu_tensor_read(n,0,normed,T*width*4)&&!memcmp(reference,normed,T*width*4));
+        for(unsigned i=0;i<T*width;i++) assert(fabsf(normed[i]-expected[i])<2e-5f);
+        assert(ds4_gpu_tensor_write(n,0,inputs,T*width*4));
+        assert(ds4_gpu_muse_input_norm_tensor(n,n,matrix,map_size,32768,T,width,1e-8f));
+        assert(ds4_gpu_tensor_read(n,0,normed,T*width*4)&&!memcmp(reference,normed,T*width*4));
     }
     float beta[K];
     for (unsigned i = 0; i < K; i++) beta[i] = .75f-i*.002f;

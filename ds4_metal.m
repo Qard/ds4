@@ -50659,7 +50659,9 @@ int ds4_gpu_muse_input_norm_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,
     if (!muse_tensor(&b[0], x, (uint64_t)rows * width * 4) ||
         !muse_weight_bind(&b[1], map, size, weight_offset, (uint64_t)width * 4) ||
         !muse_tensor(&b[2], out, (uint64_t)rows * width * 4)) return 0;
-    return muse_dispatch("kernel_muse_input_norm", &a, sizeof(a), b, 3, MTLSizeMake(rows, 1, 1));
+    return muse_dispatch(getenv("DS4_METAL_MUSE_NORM_REFERENCE")?
+        "kernel_muse_input_norm":"kernel_muse_input_norm_unroll",
+        &a,sizeof(a),b,3,MTLSizeMake(rows,1,1));
 }
 
 typedef struct {

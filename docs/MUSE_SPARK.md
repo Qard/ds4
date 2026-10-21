@@ -603,10 +603,35 @@ These results supersede the short-run speeds as the current sustained result;
 10 decode tokens/s remains a target. They do not form a controlled speedup ratio
 against the earlier archive-text, teacher-forced run with a larger expert cache.
 
-Post-Q6 profiling attributes approximately 27% of GPU encoder time to Q6_K
-projections, 22% to Q8 projections, 33% to experts, and 10% to input normalization
-at a short prefix. Those instrumented proportions guide further investigation;
-they are not 8K throughput measurements. A partial process-I/O sampler covering
+An additional 8192-token profile attributes 22.5% of decode GPU encoder time to
+Q6_K projections, 22.5% to Q8 projections, 28.3% to experts, 11.3% to attention,
+and 9.4% to input normalization. Its 64-token decode took about 229 ms/token,
+including about 168 ms/token in GPU encoders. Its 202,048 prompt-frontier logits
+matched the uninstrumented sweep exactly. These instrumented proportions guide
+investigation; use the uninstrumented sweep for throughput claims.
+
+A partial process-I/O sampler covering
 the 4K/6K/8K probes recorded approximately 22.3/31.8/27.6 GiB of attributed disk
 reads across each roughly 29-second probe interval. Snapshot and sampling
 boundaries make those approximate per-probe observations.
+
+Gain-before-RMS normalization now loads four strided values ahead of its serial
+FP32 accumulation. It preserves the multiplication/FMA order, SIMD reduction,
+and in-place behavior. A warmed bounded comparison measured 2.87x at width 8192
+with one row, 2.20x at width 4096 with eight rows, and 1.36x at width 8192 with
+512 rows. Every output bit matched the original kernel. Tail-width fixtures
+also compare both implementations against independent double-precision sums.
+
+```sh
+make tests/test_muse_metal
+./tests/test_muse_metal --bench-norm 1.5
+```
+
+A balanced full-checkpoint comparison with a 16-token prefix, four warmup steps,
+and 64 measured tokens per variant measured 7.87 versus 7.59 decode tokens/s.
+All 13,941,312 logits and 68 selected IDs matched exactly. This short-prefix
+comparison establishes a local gain; it does not replace the sustained 8K
+measurement above. Q8 threadgroup sizing, a one-token Q8 specialization, and
+grouping attention query heads by their shared KV head preserved exact outputs
+but showed no useful model or kernel gain, so those production experiments
+were discarded.
