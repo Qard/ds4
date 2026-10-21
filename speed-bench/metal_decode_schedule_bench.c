@@ -610,6 +610,8 @@ int main(int argc, char **argv) {
                 elapsed[variant_i] += t1 - t0;
                 measured_tokens[variant_i]++;
             }
+            if(token_trace) fprintf(stderr,"trace_decode_eval step=%d variant=%s seconds=%.9f\n",
+                step,variant_i==0?"control":"candidate",t1-t0);
         }
         if (cfg.include_selection) {
             if (selected[0] != selected[1]) {

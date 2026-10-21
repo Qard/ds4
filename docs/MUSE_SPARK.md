@@ -758,8 +758,10 @@ exact parity formula was also slower. All retained raw-bit comparisons passed;
 these experiments introduce no production kernel changes.
 
 The existing decode A/B benchmark can emit its actual prefix and evaluated
-input token IDs with `DS4_METAL_DECODE_BENCH_TOKEN_TRACE=1`. This diagnostic is
-outside timed evaluation and selection. It allows prefix-copy hit rates to be
+input token IDs with `DS4_METAL_DECODE_BENCH_TOKEN_TRACE=1`. It also records
+individual evaluation durations after each timed interval. Recorded durations
+are checked against printed aggregates and support paired timing analysis.
+This diagnostic is outside timed evaluation and selection. It allows prefix-copy hit rates to be
 measured before adding stateful lookahead. It does not change sampling or model
 execution. Saved prefixes remain usable through `--load-prefix` for subsequent
 native decode experiments.
