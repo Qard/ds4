@@ -453,3 +453,10 @@ body before the internal request, keeps incomplete recipient headers entirely
 in the retained tail, and reserves space for the possible closing token.
 Every token cut through user/assistant headers and bodies has a framing
 regression. Native revalidation reuses the failed canary code; it is pending.
+
+Independent attention fixtures also compare the newest two queries after 8193
+positions against an FP64 CPU reference. A global NoPE sentinel requires a key
+at position zero to remain visible (a mistakenly clipped window would return
+zero); its maximum error was 8.48e-7. The 2048-token sliding-ring/RoPE case had
+maximum error 1.02e-6. These checks use small synthetic tensors, not CPU model
+inference.
