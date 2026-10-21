@@ -36,6 +36,7 @@ typedef struct {
     int warmup;
     int measured;
     bool include_selection;
+    bool clone_prefix;
     decode_schedule control;
     decode_schedule candidate;
 } bench_config;
@@ -57,6 +58,7 @@ static void usage(FILE *fp, const char *argv0) {
             "  --candidate-env NAME   environment variable to compare\n"
             "  --control-value VALUE  control environment value (default: unset)\n"
             "  --candidate-value VALUE candidate environment value (default: 1)\n"
+            "  --clone-prefix         snapshot the first prefill into the second session\n"
             "  --include-selection    include one non-EOS argmax in each timed step\n",
             argv0);
 }
@@ -120,6 +122,8 @@ static bench_config parse_options(int argc, char **argv) {
             cfg.candidate_value = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--include-selection")) {
             cfg.include_selection = true;
+        } else if (!strcmp(arg, "--clone-prefix")) {
+            cfg.clone_prefix = true;
         } else if (!strcmp(arg, "--prefix-tokens")) {
             cfg.prefix_tokens =
                 parse_int_arg(need_arg(&i, argc, argv, arg), arg, 1);
@@ -389,6 +393,7 @@ int main(int argc, char **argv) {
     ds4_engine *engine = NULL;
     ds4_session *sessions[VARIANT_COUNT] = {0};
     ds4_tokens tokens = {0};
+    ds4_session_snapshot prefix_snapshot = {0};
     float *logits[VARIANT_COUNT] = {0};
     char err[256] = {0};
     double elapsed[VARIANT_COUNT] = {0};
@@ -432,11 +437,20 @@ int main(int argc, char **argv) {
     };
     for (int i = 0; i < VARIANT_COUNT; i++) {
         if (ds4_session_create(&sessions[i], engine, cfg.ctx) != 0 ||
-            ds4_session_sync(sessions[i], &prefix, err, sizeof(err)) != 0) {
+            (cfg.clone_prefix && i > 0
+                ? ds4_session_load_snapshot(sessions[i], &prefix_snapshot, err, sizeof(err))
+                : ds4_session_sync(sessions[i], &prefix, err, sizeof(err))) != 0) {
             fprintf(stderr,
                     "metal-decode-schedule-bench: session %d prefill failed: %s\n",
                     i,
                     err[0] ? err : "unknown error");
+            goto done;
+        }
+        /* Decode comparisons use the same control prefill. Copying its full
+         * state avoids repeating a long SSD prefill; the snapshot is temporary. */
+        if (cfg.clone_prefix && i == 0 &&
+            ds4_session_save_snapshot(sessions[i], &prefix_snapshot, err, sizeof(err)) != 0) {
+            fprintf(stderr,"metal-decode-schedule-bench: prefix snapshot failed: %s\n",err);
             goto done;
         }
         logits[i] = malloc((size_t)vocab * sizeof(logits[i][0]));
@@ -446,11 +460,12 @@ int main(int argc, char **argv) {
             goto done;
         }
     }
+    ds4_session_snapshot_free(&prefix_snapshot);
 
     fprintf(stderr,
             "metal-decode-schedule-bench: model=%s prompt=%s prefix=%d "
             "ctx=%d warmup=%d measured=%d control=%d/%d candidate=%d/%d "
-            "candidate_env=%s control_value=%s candidate_value=%s include_selection=%s\n",
+            "candidate_env=%s control_value=%s candidate_value=%s include_selection=%s clone_prefix=%s\n",
             cfg.model_path,
             cfg.prompt_path,
             cfg.prefix_tokens,
@@ -464,7 +479,8 @@ int main(int argc, char **argv) {
             cfg.candidate_env ? cfg.candidate_env : "(none)",
             cfg.control_value ? cfg.control_value : "<unset>",
             cfg.candidate_value,
-            cfg.include_selection ? "yes" : "no");
+            cfg.include_selection ? "yes" : "no",
+            cfg.clone_prefix ? "yes" : "no");
 
     const int eos = ds4_token_eos(engine);
     const int total_steps = cfg.warmup + cfg.measured;
@@ -586,6 +602,7 @@ int main(int argc, char **argv) {
 
 done:
     free(text);
+    ds4_session_snapshot_free(&prefix_snapshot);
     for (int i = 0; i < VARIANT_COUNT; i++) {
         free(logits[i]);
         if (sessions[i]) ds4_session_free(sessions[i]);

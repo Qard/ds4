@@ -47,6 +47,10 @@ or `--help` to compare explicit split schedules.
 Numeric controls can use `--control-value TEXT` and `--candidate-value TEXT`.
 By default the control unsets the variable and the candidate sets it to `1`.
 Use variables read at dispatch time; the harness shares one initialized engine.
+For expensive prefixes, `--clone-prefix` prefills the first session once and
+loads its snapshot into the second. Both sessions still start with the same
+control prefill. The temporary host snapshot is freed before timed decode;
+allow enough memory for it during setup. The default prefills both sessions.
 
 To compare the default pre-M5 ratio-4 compressor pack/transpose fusion with the
 legacy decode path, including token selection, use:
