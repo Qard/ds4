@@ -460,3 +460,19 @@ at position zero to remain visible (a mistakenly clipped window would return
 zero); its maximum error was 8.48e-7. The 2048-token sliding-ring/RoPE case had
 maximum error 1.02e-6. These checks use small synthetic tensors, not CPU model
 inference.
+
+The framed canary repeated the missing-code failure. Controlled native prompt
+probes then restored the same 6967-token source snapshot before each request;
+all 202048 prefix logits restored exactly (maximum error zero). Direct retrieval
+returned the exact early code in 21 tokens. The existing summary request returned
+only its four-token acknowledgment. Clarifying that the next response must
+contain the actual summary text preserved the code in a 73-token summary; an
+additional exact-identifiers variant also preserved it (115 tokens). All four
+responses stopped normally.
+
+The shared compaction request now uses the tested clarification, replacing the
+meta-style acknowledgment-prone preamble. The common fact-preservation rules,
+summary budget, and tool restrictions remain the same. The production request
+was checked byte-for-byte against the successful controlled input. Final native
+validation combines the early-code canary with the complete 8K reasoning-mode
+agent recovery suite.

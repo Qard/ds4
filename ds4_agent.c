@@ -9953,7 +9953,9 @@ static void agent_compact_resume_prefix(ds4_engine *engine, const ds4_tokens *so
 static char *agent_compact_make_prompt(const char *reason) {
     agent_buf b = {0};
     agent_buf_puts(&b,
-        "Internal ds4-agent context compaction request. This is not a user request.\n"
+        "Summarize the conversation above for the assistant who will continue the work. "
+        "Your next message must contain the actual summary text. Do not acknowledge this request, "
+        "claim that a summary was saved, or continue the task.\n"
         "Write a durable task-state summary of the conversation so far. Preserve only facts that matter for continuing the work:\n"
         "- user goals, constraints, and preferences\n"
         "- files inspected or edited\n"
