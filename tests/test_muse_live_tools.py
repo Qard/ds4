@@ -35,6 +35,29 @@ class LiveToolsTests(unittest.TestCase):
         result['output'][1]['arguments']='{"key":"right"}'
         with self.assertRaises(ValueError):multi_continuation('responses',result,{'left':'L','right':'R'})
 
+    def test_reversed_output_only_results_preserve_ids_and_values(self):
+        values={'left':'L','right':'R'}
+        fixtures={
+            'openai':{'choices':[{'message':{'role':'assistant','tool_calls':[
+                {'id':k,'function':{'name':'validation_lookup','arguments':json.dumps({'key':k})}} for k in values]}}]},
+            'anthropic':{'content':[{'type':'tool_use','id':k,'name':'validation_lookup','input':{'key':k}} for k in values]},
+            'responses':{'output':[{'type':'function_call','call_id':k,'name':'validation_lookup','arguments':json.dumps({'key':k})} for k in values]}}
+        for api,result in fixtures.items():
+            with self.subTest(api=api):
+                tail=multi_continuation(api,result,values,reverse=True,output_only=api!='openai')
+                if api=='openai':
+                    self.assertEqual([t['tool_call_id'] for t in tail[1:]],['right','left'])
+                    self.assertEqual([t['content'] for t in tail[1:]],['R','L'])
+                elif api=='anthropic':
+                    self.assertEqual(len(tail),1)
+                    self.assertEqual([t['tool_use_id'] for t in tail[0]['content']],['right','left'])
+                    self.assertEqual([t['content'] for t in tail[0]['content']],['R','L'])
+                else:
+                    self.assertEqual(len(tail),2)
+                    self.assertEqual([t['call_id'] for t in tail],['right','left'])
+                    self.assertEqual([t['output'] for t in tail],['R','L'])
+        with self.assertRaises(ValueError):multi_continuation('openai',fixtures['openai'],values,output_only=True)
+
     def test_plan_is_complete_and_does_not_contact_server(self):
         with tempfile.TemporaryDirectory() as tmp:
             output=Path(tmp)/'not-created'

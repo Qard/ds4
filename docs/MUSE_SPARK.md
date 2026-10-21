@@ -188,6 +188,8 @@ answer in JSON and SSE for all three APIs:
 ```sh
 python3 tests/muse_live_tools.py --output /tmp/muse-multiple-tools --plan
 python3 tests/muse_live_tools.py --output /tmp/muse-multiple-tools
+python3 tests/muse_live_tools.py --output /tmp/muse-reversed-tools --reverse-results
+python3 tests/muse_live_tools.py --output /tmp/muse-live-tools --api anthropic responses --reverse-results --output-only
 ```
 
 A separate run after restarting the server requires a

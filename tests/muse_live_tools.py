@@ -48,7 +48,8 @@ def assemble_tool_stream(api,events):
     return result
 
 
-def multi_continuation(api,result,values):
+def multi_continuation(api,result,values,*,reverse=False,output_only=False):
+    if output_only and api=='openai':raise ValueError('OpenAI chat requires assistant history')
     if api=='openai':
         calls=result['choices'][0]['message'].get('tool_calls',[])
         normalized=[(t['id'],t['function']['name'],json.loads(t['function']['arguments'])) for t in calls]
@@ -62,12 +63,13 @@ def multi_continuation(api,result,values):
         any(not t[0] or t[1]!='validation_lookup' or t[2] not in ({'key':'left'},{'key':'right'}) for t in normalized) or
         {t[2]['key'] for t in normalized}!={'left','right'}):
         raise ValueError(f'expected two distinct left/right lookup calls: {normalized!r}')
+    replies=normalized[::-1] if reverse else normalized
     if api=='openai':
-        return [result['choices'][0]['message']]+[{'role':'tool','tool_call_id':i,'content':values[a['key']]} for i,n,a in normalized]
+        return [result['choices'][0]['message']]+[{'role':'tool','tool_call_id':i,'content':values[a['key']]} for i,n,a in replies]
     if api=='anthropic':
-        return [{'role':'assistant','content':result['content']},{'role':'user','content':[
-            {'type':'tool_result','tool_use_id':i,'content':values[a['key']]} for i,n,a in normalized]}]
-    return result['output']+[{'type':'function_call_output','call_id':i,'output':values[a['key']]} for i,n,a in normalized]
+        return ([] if output_only else [{'role':'assistant','content':result['content']}])+[{'role':'user','content':[
+            {'type':'tool_result','tool_use_id':i,'content':values[a['key']]} for i,n,a in replies]}]
+    return ([] if output_only else result['output'])+[{'type':'function_call_output','call_id':i,'output':values[a['key']]} for i,n,a in replies]
 
 
 def main():
@@ -77,9 +79,12 @@ def main():
     parser.add_argument('--output',required=True,type=Path)
     parser.add_argument('--timeout',type=float,default=3600)
     parser.add_argument('--api',nargs='+',choices=ENDPOINTS,default=list(ENDPOINTS))
+    parser.add_argument('--reverse-results',action='store_true')
+    parser.add_argument('--output-only',action='store_true',help='Use live call IDs without replaying history (Anthropic/Responses only)')
     parser.add_argument('--plan',action='store_true')
     args=parser.parse_args()
     if args.timeout<=0 or len(set(args.api))!=len(args.api):parser.error('invalid timeout or repeated API')
+    if args.output_only and 'openai' in args.api:parser.error('--output-only requires --api anthropic responses')
     if args.plan:
         print(json.dumps({api:{'json':multi_request_body(api,args.model,False),'stream':multi_request_body(api,args.model,True)} for api in args.api},indent=2));return
     args.output.mkdir(parents=True,exist_ok=False)
@@ -94,10 +99,10 @@ def main():
                         if line.startswith('data:') and line[5:].strip()!='[DONE]']
                 result=assemble_tool_stream(api,events)
             values={key:'NONCE_'+uuid.uuid4().hex for key in ('left','right')}
-            tail=multi_continuation(api,result,values)
+            tail=multi_continuation(api,result,values,reverse=args.reverse_results,output_only=args.output_only)
             follow=dict(body);follow['stream']=False
             key='input' if api=='responses' else 'messages'
-            follow[key]=body[key]+tail
+            follow[key]=tail if args.output_only else body[key]+tail
             text=visible_text(api,client.call(name+'-results',api,follow)).strip()
             if text!=values['left']+'|'+values['right']:raise ValueError(f'incorrect ordered tool results: {text!r}')
             (args.output/(name+'.parsed.json')).write_text(json.dumps(result,indent=2)+'\n')

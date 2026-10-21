@@ -41,6 +41,9 @@ def prepare(output,repo,model):
     plan['api']=api+['--output',str(output/'api'),'--with-reasoning']
     plan['api_multiple_tools']=['python3',str(repo/'tests/muse_live_tools.py'),'--url','http://127.0.0.1:8765',
                                 '--output',str(output/'api-multiple-tools')]
+    plan['api_reversed_tools']=plan['api_multiple_tools'][:-1]+[str(output/'api-reversed-tools'),'--reverse-results']
+    plan['api_live_tools']=plan['api_multiple_tools'][:-1]+[str(output/'api-live-tools'),
+        '--api','anthropic','responses','--reverse-results','--output-only']
     plan['api_prime']=api+['--output',str(output/'api-prime'),'--api','openai']
     plan['api_restored']=api+['--output',str(output/'api-restored'),'--api','openai','--require-initial-cache']
     agent=['uv','run','--with','pyte','--with','wcwidth','python',str(repo/'tests/test_agent_compaction.py'),
@@ -73,7 +76,7 @@ def prepare(output,repo,model):
         'Start this foreground server in a terminal. Wait for it to finish loading before starting clients.','',
         '```sh',shlex.join(plan['server']),'```','',
         'In another terminal, run the full API suite, the two-call JSON/SSE probe, then prime the short OpenAI prefix:','',
-        '```sh',shlex.join(plan['api']),shlex.join(plan['api_multiple_tools']),shlex.join(plan['api_prime']),'```','',
+        '```sh',shlex.join(plan['api']),shlex.join(plan['api_multiple_tools']),shlex.join(plan['api_reversed_tools']),shlex.join(plan['api_live_tools']),shlex.join(plan['api_prime']),'```','',
         'Stop this server with Ctrl-C. Restart with the same KV directory and a fresh trace file:',
         '', '```sh',shlex.join(plan['server_restart']),'```','',
         'The next client requires a cache hit on its very first request, before any in-process priming:','',
