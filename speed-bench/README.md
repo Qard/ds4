@@ -44,6 +44,10 @@ row is bit-identical and, with `--include-selection`, both variants select the
 same non-EOS token. Use `--candidate-env NAME` to measure a rollback control,
 or `--help` to compare explicit split schedules.
 
+Numeric controls can use `--control-value TEXT` and `--candidate-value TEXT`.
+By default the control unsets the variable and the candidate sets it to `1`.
+Use variables read at dispatch time; the harness shares one initialized engine.
+
 To compare the default pre-M5 ratio-4 compressor pack/transpose fusion with the
 legacy decode path, including token selection, use:
 

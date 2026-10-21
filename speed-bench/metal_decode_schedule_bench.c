@@ -29,6 +29,8 @@ typedef struct {
     const char *model_path;
     const char *prompt_path;
     const char *candidate_env;
+    const char *candidate_value;
+    const char *control_value;
     int prefix_tokens;
     int ctx;
     int warmup;
@@ -52,7 +54,9 @@ static void usage(FILE *fp, const char *argv0) {
             "  --control-second N     control second split (default: 32)\n"
             "  --candidate-first N    candidate first split (default: 1; control with --candidate-env)\n"
             "  --candidate-second N   candidate second split (default: 32; control with --candidate-env)\n"
-            "  --candidate-env NAME   unset NAME for control, set NAME=1 for candidate\n"
+            "  --candidate-env NAME   environment variable to compare\n"
+            "  --control-value VALUE  control environment value (default: unset)\n"
+            "  --candidate-value VALUE candidate environment value (default: 1)\n"
             "  --include-selection    include one non-EOS argmax in each timed step\n",
             argv0);
 }
@@ -87,6 +91,7 @@ static bench_config parse_options(int argc, char **argv) {
         .model_path = "ds4flash.gguf",
         .prompt_path = "ds4.c",
         .candidate_env = NULL,
+        .candidate_value = "1",
         .prefix_tokens = DEFAULT_PREFIX_TOKENS,
         .ctx = DEFAULT_CTX,
         .warmup = DEFAULT_WARMUP,
@@ -109,6 +114,10 @@ static bench_config parse_options(int argc, char **argv) {
             cfg.prompt_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--candidate-env")) {
             cfg.candidate_env = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--control-value")) {
+            cfg.control_value = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--candidate-value")) {
+            cfg.candidate_value = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--include-selection")) {
             cfg.include_selection = true;
         } else if (!strcmp(arg, "--prefix-tokens")) {
@@ -248,8 +257,10 @@ static int select_variant(const bench_config *cfg, int variant) {
     }
     if (cfg->candidate_env &&
         (variant == 0
-             ? unsetenv(cfg->candidate_env)
-             : setenv(cfg->candidate_env, "1", 1)) != 0) {
+             ? (cfg->control_value
+                    ? setenv(cfg->candidate_env, cfg->control_value, 1)
+                    : unsetenv(cfg->candidate_env))
+             : setenv(cfg->candidate_env, cfg->candidate_value, 1)) != 0) {
         fprintf(stderr,
                 "metal-decode-schedule-bench: failed to select candidate "
                 "environment %s for %s: %s\n",
@@ -439,7 +450,7 @@ int main(int argc, char **argv) {
     fprintf(stderr,
             "metal-decode-schedule-bench: model=%s prompt=%s prefix=%d "
             "ctx=%d warmup=%d measured=%d control=%d/%d candidate=%d/%d "
-            "candidate_env=%s include_selection=%s\n",
+            "candidate_env=%s control_value=%s candidate_value=%s include_selection=%s\n",
             cfg.model_path,
             cfg.prompt_path,
             cfg.prefix_tokens,
@@ -451,6 +462,8 @@ int main(int argc, char **argv) {
             cfg.candidate.first,
             cfg.candidate.second,
             cfg.candidate_env ? cfg.candidate_env : "(none)",
+            cfg.control_value ? cfg.control_value : "<unset>",
+            cfg.candidate_value,
             cfg.include_selection ? "yes" : "no");
 
     const int eos = ds4_token_eos(engine);
