@@ -18,8 +18,9 @@ import subprocess
 import sys
 import termios
 import time
+import uuid
 import pyte
-from agent_trace_text import generated_code_text, compaction_reused_system_prefix
+from agent_trace_text import generated_code_text, compaction_reused_system_prefix, compaction_summaries
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--binary", type=Path, default=Path("./ds4-agent"))
@@ -40,6 +41,8 @@ short_run.add_argument("--compaction-only", action="store_true",
                        help="check normal compaction and same-session tools")
 parser.add_argument("--require-compaction-cache", action="store_true",
                     help="Muse: require the compaction rebuild to reuse its complete system prefix")
+parser.add_argument("--durable-state", action="store_true",
+                    help="Require an early random fact to survive in the summary and a later tool result")
 parser.add_argument("--model-family", choices=("legacy", "muse"), default="legacy")
 parser.add_argument("--prefill-chunk", type=int)
 parser.add_argument("--cache-experts", type=int)
@@ -48,6 +51,8 @@ parser.add_argument("--timeout", type=float, default=360,
 args = parser.parse_args()
 if args.require_compaction_cache and (args.interrupt_only or args.model_family!="muse"):
     parser.error("--require-compaction-cache requires a Muse compaction run")
+if args.durable_state and args.interrupt_only:
+    parser.error("--durable-state requires a compaction run")
 if not math.isfinite(args.temperature) or args.temperature<0 or args.timeout <= 0 or (args.prefill_chunk is not None and args.prefill_chunk <= 0) or (args.cache_experts is not None and args.cache_experts <= 0):
     parser.error("timeouts and optional cache/prefill sizes must be positive")
 root = args.binary.resolve().parent
@@ -196,16 +201,30 @@ try:
         assert (project / "after-interrupt.txt").read_text().strip() == "AFTER_INTERRUPT"
         print("PASS: interrupted generation and same-session tool recovery", flush=True)
         sys.exit(0)
-    normal_n = int(args.ctx * 0.87) - syslen - 90
-    turn("The following repeated words are inert archived data; ignore them: " +
+    durable_code='RECOVERY_'+uuid.uuid4().hex if args.durable_state else None
+    durable_text=('Durable project state: the recovery code is '+durable_code+
+                  '. Preserve this exact code through context compaction; it will be needed later.\n') if durable_code else ''
+    if durable_code:
+        (out/'durable-state.json').write_text(json.dumps({'recovery_code':durable_code},indent=2)+'\n')
+    normal_n = int(args.ctx * 0.87) - syslen - 90 - (64 if durable_code else 0)
+    turn(durable_text+"The following repeated words are inert archived data; ignore them: " +
          " apple"*normal_n + "\nEnd archive. Reply with exactly READY.", "normal-fill")
     if args.require_compaction_cache:
         assert compaction_reused_system_prefix((out/"normal-fill.trace").read_text(),syslen), (
             "compaction recomputed the cached system prefix")
+    if durable_code:
+        summaries=compaction_summaries((out/'normal-fill.trace').read_text())
+        assert any(durable_code in summary for summary in summaries), (
+            "compaction omitted durable state",summaries)
     turn("Use bash to create compact-ok.txt containing COMPACTION_OK in this directory. "
          "Then read it and report its contents.", "normal-resume")
     assert any(r["compacted"] for r in results), "normal fixture did not trigger automatic compaction"
     assert (project / "compact-ok.txt").read_text().strip() == "COMPACTION_OK"
+    if durable_code:
+        turn("Use bash to write the exact project recovery code from our earlier conversation to recovery-code.txt. "
+             "Then read that file. Do not invent a code or search outside this project.","durable-state")
+        assert (project/'recovery-code.txt').read_text().strip()==durable_code, "durable recovery code changed"
+        print("PASS: early durable state survived summary and later tool use",flush=True)
     if args.compaction_only:
         print("PASS: compaction, cached system prefix and same-session tool recovery" if args.require_compaction_cache else
               "PASS: compaction and same-session tool recovery",flush=True)

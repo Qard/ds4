@@ -52,6 +52,8 @@ def prepare(output,repo,model):
     plan['agent_interrupt']=agent+['--interrupt-only','--output',str(output/'agent-interrupt')]
     cache_agent=agent.copy();cache_agent[cache_agent.index('--ctx')+1]='4096'
     plan['agent_cache']=cache_agent+['--compaction-only','--require-compaction-cache','--output',str(output/'agent-cache')]
+    plan['agent_durable_state']=cache_agent+['--compaction-only','--require-compaction-cache','--durable-state',
+        '--think','--temperature','1','--tokens','2048','--output',str(output/'agent-durable-state')]
     plan['agent_compaction']=agent+['--require-compaction-cache','--output',str(output/'agent-compaction')]
     plan['agent_reasoning']=agent+['--think','--temperature','1','--tokens','4096','--require-compaction-cache','--output',str(output/'agent-reasoning')]
     (output/'commands.json').write_text(json.dumps(plan,indent=2)+'\n')
@@ -85,7 +87,7 @@ def prepare(output,repo,model):
         'Each test starts one ds4-agent in an isolated temporary HOME/project below its output directory.',
         'The agent is explicitly instructed to create test files and compile generated C in that project.',
         'Run one command at a time. The reasoning variant repeats the compaction/recovery checks.','', '```sh',
-        shlex.join(plan['agent_interrupt']),shlex.join(plan['agent_cache']),shlex.join(plan['agent_compaction']),shlex.join(plan['agent_reasoning']),
+        shlex.join(plan['agent_interrupt']),shlex.join(plan['agent_cache']),shlex.join(plan['agent_durable_state']),shlex.join(plan['agent_compaction']),shlex.join(plan['agent_reasoning']),
         '```','', '## Acceptance','',
         'Passing these stages is evidence, not an automatic production-ready declaration. Review numerical errors,',
         'coherent output, reasoning/tool boundaries, cache restoration, working-set pressure and useful throughput.',

@@ -1,5 +1,6 @@
+import json
 import unittest
-from agent_trace_text import generated_code_text, compaction_reused_system_prefix
+from agent_trace_text import generated_code_text, compaction_reused_system_prefix, compaction_summaries
 
 class AgentTraceTests(unittest.TestCase):
     def test_recipient_headers_and_reasoning_are_removed(self):
@@ -16,6 +17,14 @@ class AgentTraceTests(unittest.TestCase):
     def test_incomplete_or_ambiguous_header_is_rejected(self):
         for raw in (' to=self',' to=user to=self<|message|>private',' to=<|message|>private'):
             with self.assertRaises(ValueError): generated_code_text(raw,True,'muse')
+
+    def test_summary_canary_cannot_match_quoted_user_text(self):
+        value='Durable code RECOVERY_abc; quoted "value".'
+        record='compaction-summary='+json.dumps(value)
+        trace='2026-10-21 10:18:35.818 user='+json.dumps(record)+'\n'
+        self.assertEqual(compaction_summaries(trace),[])
+        self.assertEqual(compaction_summaries(trace+'2026-10-21 10:18:35.818 '+record+'\n'),[value])
+        self.assertEqual(compaction_summaries('compaction-summary="truncated'),[])
 
     def test_compaction_prefix_reuse_requires_a_complete_ledger(self):
         good='prefill sync done prompt=2317 cached=1341 suffix=976 rc=0 123.000 ms'

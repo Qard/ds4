@@ -1,5 +1,13 @@
 """Check live agent traces and extract generated C without changing body tags."""
+import json
 import re
+
+
+def compaction_summaries(trace):
+    """Read actual summary records; quoted request text is not evidence."""
+    records=re.findall(r'^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ )?'
+                       r'compaction-summary=("(?:[^"\\]|\\.)*")\s*$',trace,re.M)
+    return [json.loads(record) for record in records]
 
 
 def generated_code_text(raw,think,family):
