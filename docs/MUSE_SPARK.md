@@ -408,3 +408,12 @@ cases additionally passed reversed output-only continuations for Anthropic and
 Responses: all exact left/right nonce results matched, using the 859-token live
 frontier and only 78-89 new result tokens. Disk-cache eviction at its configured
 8 GiB limit also completed without disrupting continuations.
+
+The native `ds4-eval` driver passed full-checkpoint smoke cases in both modes:
+SuperGPQA Agronomy returned the expected `C` with reasoning disabled (288 prompt
+and 203 generated tokens); AIME 2025 number theory returned the expected `70`
+with high reasoning (221 prompt and 1193 generated tokens). Only public final
+text entered the answer extractor. Both runs exercised the default 512-token
+prefill setting. Evaluation retains its shared sampling defaults; the high-mode
+case explicitly used temperature 1 with the evaluation default min-p of 0.05.
+These two smoke cases are integration evidence, not a benchmark accuracy claim.
