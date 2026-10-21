@@ -35,6 +35,7 @@ def compaction_reused_system_prefix(trace,system_tokens):
     compaction rebuild that happened immediately before it.
     """
     if system_tokens<=0:return False
-    records=re.findall(r'prefill sync done prompt=(\d+) cached=(\d+) suffix=(\d+) rc=(\d+)\b',trace)
+    records=re.findall(r'^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+ )?'
+                       r'prefill sync done prompt=(\d+) cached=(\d+) suffix=(\d+) rc=(\d+)\b',trace,re.M)
     return bool(records) and all(rc==0 and cached>=system_tokens and suffix>0 and prompt==cached+suffix
                for prompt,cached,suffix,rc in (map(int,row) for row in records))

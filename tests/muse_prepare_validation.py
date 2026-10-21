@@ -17,7 +17,7 @@ def prepare(output,repo,model):
           'native':['uv','run','--script',str(repo/'tests/muse_native_validation.py'),
                     '--model',str(model),'--output',str(output/'native')],
           'benchmarks':[]}
-    for name,chunk,cache in [('cache512-chunk32',32,512),('auto-chunk32',32,None),('auto-chunk128',128,None)]:
+    for name,chunk,cache in [('cache512-chunk32',32,512),('auto-chunk512',512,None),('auto-chunk128',128,None)]:
         directory=output/name;directory.mkdir();(directory/'logits').mkdir()
         command=['env','-u','DS4_METAL_MEMORY_REPORT','DS4_METAL_STREAMING_EXPERT_TIMING_SUMMARY=1',str(repo/'ds4-bench'),'--model',str(model),'--metal','--ssd-streaming',
                  '--prefill-chunk',str(chunk),'--prompt-file',str(output/'benchmark.txt'),
@@ -27,11 +27,11 @@ def prepare(output,repo,model):
         if cache:command+=['--ssd-streaming-cache-experts',str(cache)]
         plan['benchmarks'].append({'name':name,'command':command})
     plan['compare_benchmarks']=[['uv','run','--script',str(repo/'tests/muse_compare_frontiers.py'),
-        str(output/'auto-chunk32/logits'),str(output/name/'logits')]
+        str(output/'auto-chunk512/logits'),str(output/name/'logits')]
         for name in ('cache512-chunk32','auto-chunk128')]
     server_dir=output/'server';server_dir.mkdir();(server_dir/'kv').mkdir()
     plan['server']=[str(repo/'ds4-server'),'--model',str(model),'--metal','--ssd-streaming',
-        '--ctx','8192','--prefill-chunk','32','--batched-session','1',
+        '--ctx','8192','--prefill-chunk','512','--batched-session','1',
         '--host','127.0.0.1','--port','8765','--kv-disk-dir',str(server_dir/'kv'),
         '--kv-disk-space-mb','8192','--kv-cache-min-tokens','1',
         '--kv-cache-boundary-trim-tokens','0','--kv-cache-boundary-align-tokens','1',
@@ -45,10 +45,12 @@ def prepare(output,repo,model):
     plan['api_restored']=api+['--output',str(output/'api-restored'),'--api','openai','--require-initial-cache']
     agent=['uv','run','--with','pyte','--with','wcwidth','python',str(repo/'tests/test_agent_compaction.py'),
         '--binary',str(repo/'ds4-agent'),'--model',str(model),'--model-family','muse',
-        '--ssd-streaming','--ctx','8192','--prefill-chunk','32','--timeout','3600']
+        '--ssd-streaming','--ctx','8192','--prefill-chunk','512','--timeout','3600']
     plan['agent_interrupt']=agent+['--interrupt-only','--output',str(output/'agent-interrupt')]
-    plan['agent_compaction']=agent+['--output',str(output/'agent-compaction')]
-    plan['agent_reasoning']=agent+['--think','--temperature','1','--output',str(output/'agent-reasoning')]
+    cache_agent=agent.copy();cache_agent[cache_agent.index('--ctx')+1]='4096'
+    plan['agent_cache']=cache_agent+['--compaction-only','--require-compaction-cache','--output',str(output/'agent-cache')]
+    plan['agent_compaction']=agent+['--require-compaction-cache','--output',str(output/'agent-compaction')]
+    plan['agent_reasoning']=agent+['--think','--temperature','1','--tokens','4096','--require-compaction-cache','--output',str(output/'agent-reasoning')]
     (output/'commands.json').write_text(json.dumps(plan,indent=2)+'\n')
     lines=['# Prepared native Muse validation','',
         'These commands open the full checkpoint. Run only after the LM Studio hold is released.',
@@ -80,12 +82,12 @@ def prepare(output,repo,model):
         'Each test starts one ds4-agent in an isolated temporary HOME/project below its output directory.',
         'The agent is explicitly instructed to create test files and compile generated C in that project.',
         'Run one command at a time. The reasoning variant repeats the compaction/recovery checks.','', '```sh',
-        shlex.join(plan['agent_interrupt']),shlex.join(plan['agent_compaction']),shlex.join(plan['agent_reasoning']),
+        shlex.join(plan['agent_interrupt']),shlex.join(plan['agent_cache']),shlex.join(plan['agent_compaction']),shlex.join(plan['agent_reasoning']),
         '```','', '## Acceptance','',
         'Passing these stages is evidence, not an automatic production-ready declaration. Review numerical errors,',
         'coherent output, reasoning/tool boundaries, cache restoration, working-set pressure and useful throughput.',
-        'The full checkpoint has no independently generated golden logits yet. The bounded NumPy Muse reference',
-        'checks the graph independently; full-checkpoint chunk/cache comparisons check internal consistency.','']
+        'The independent short-prefix diagnostic is not an exact golden-logit pass; review its per-layer',
+        'routing diagnosis. Native chunk/cache comparisons still have to meet their strict tolerance.','']
     (output/'RUNBOOK.md').write_text('\n'.join(lines))
     return plan
 

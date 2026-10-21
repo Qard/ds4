@@ -20,6 +20,8 @@ class AgentTraceTests(unittest.TestCase):
     def test_compaction_prefix_reuse_requires_a_complete_ledger(self):
         good='prefill sync done prompt=2317 cached=1341 suffix=976 rc=0 123.000 ms'
         self.assertTrue(compaction_reused_system_prefix(good,1341))
+        self.assertTrue(compaction_reused_system_prefix('2026-10-21 08:19:19.551 '+good,1341))
+        self.assertFalse(compaction_reused_system_prefix('2026-10-21 08:19:19.551 user=\"'+good+'\"',1341))
         cold='prefill sync done prompt=2317 cached=0 suffix=2317 rc=0 123.000 ms'
         self.assertFalse(compaction_reused_system_prefix(cold+'\n'+good,1341))
         for bad in (good.replace('cached=1341','cached=0'),

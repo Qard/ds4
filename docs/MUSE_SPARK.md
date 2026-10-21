@@ -177,7 +177,7 @@ and `ds4-agent` binaries. Execute its stages sequentially when unified memory
 is available. The API client is the only process that runs alongside its server.
 
 The sequence covers context frontiers 1024/2048/4096/8192, bounded and automatic
-expert caches, prefill chunks 32/128, teacher-forced continuations, and full-logit
+expert caches, prefill chunks 32/128/512, teacher-forced continuations, and full-logit
 comparisons with `tests/muse_compare_frontiers.py`. API checks cover OpenAI,
 Anthropic and Responses text/streaming output, literal `<think>` text, reasoning
 channels, and named tool calls/results. The lookup tool returns a random token
@@ -349,13 +349,29 @@ of 83.28 GiB and no increase in system Swapouts over that sampled run.
   `AFTER_REJECTION` while reusing the prior valid conversation.
 
 The first two compaction exchanges took about 25.7 and 26.7 minutes before
-resumed generation. These times include summary prefill, summary generation and
-context rebuilding; they are practical latency measurements, not isolated
-kernel throughput. This baseline preceded the system-prefix reuse optimization.
-The follow-up focused check and reasoning-mode run validate that change separately.
+resumed generation. These cases deliberately submit a large new archive, so most of the summary
+source is not already in live KV. The times include summary prefill, summary
+generation and context rebuilding; they are practical cold-input latency
+measurements, not isolated kernel throughput. This baseline preceded the system-prefix reuse optimization.
+The focused follow-up passed; the full reasoning-mode run remains in progress.
 
 The Q8 dispatch experiment compared an 8192-by-8192 projection over 512 input
 rows. All 4,194,304 output floats were bit-identical, but a wider dispatch took
 19.36 ms versus 13.05 ms for the existing eight-row slices, confirmed by a second
 baseline run. The wider variant was discarded without changing the production
 path.
+
+
+The focused 4096-context check passed with system-prefix reuse enabled. The
+existing checkpoint restored all 1341 system tokens in 47.9 ms; the subsequent
+1978-token rebuild reported `cached=1341 suffix=637` and completed that suffix
+in 119 seconds. The resumed agent created and read `COMPACTION_OK`. The check
+requires a complete successful cache ledger, so a later two-token assistant
+sync cannot hide a cold compaction rebuild. Its 47 memory samples peaked at
+83.13 GiB process RSS with no increase in Swapouts.
+
+This uses the existing agent KV loader, including its model, quantization and
+exact-text checks, and additionally verifies the complete token prefix before
+reporting a hit. It does not replace the conversation transcript. Missing or
+invalid cache files fall back to the ordinary sync. The native loader, graph
+and arithmetic are unchanged by this optimization.

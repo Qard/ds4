@@ -22,6 +22,13 @@ class PreparationTests(unittest.TestCase):
             self.assertIn('muse_live_tools.py',(root/'RUNBOOK.md').read_text())
             reasoning=plan['agent_reasoning']
             self.assertEqual(reasoning[reasoning.index('--temperature')+1],'1')
+            self.assertEqual(reasoning[reasoning.index('--tokens')+1],'4096')
+            self.assertIn('--require-compaction-cache',reasoning)
+            self.assertIn('--compaction-only',plan['agent_cache'])
+            self.assertIn('--require-compaction-cache',plan['agent_cache'])
+            self.assertEqual(plan['server'][plan['server'].index('--prefill-chunk')+1],'512')
+            baseline=next(b for b in plan['benchmarks'] if b['name']=='auto-chunk512')
+            self.assertEqual(baseline['command'][baseline['command'].index('--prefill-chunk')+1],'512')
             self.assertGreater(len((root/'benchmark.txt').read_text().split()),16384)
             self.assertTrue((root/'RUNBOOK.md').exists())
             with self.assertRaises(FileExistsError):prepare(root,repo,model)
