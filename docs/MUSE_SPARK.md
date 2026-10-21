@@ -1027,6 +1027,32 @@ following High Power saved-state test measured 6.10 tokens/s. Each completed
 32 warmup and 512 measured steps per session, checked 110,116,160 logits
 exactly between sessions, and selected the same 544 input token IDs across
 runs. Automatic cache admission differed (4351 versus 4653 experts), and the
-runs had different hardware histories. These observations do not establish
-a consistent power-mode speedup; a fresh restored-Automatic sweep is needed
-before attributing the sustained difference to High Power Mode.
+runs had different hardware histories. These saved-state observations do not establish
+a consistent power-mode speedup.
+
+After restoring Automatic on both AC and battery, a fresh sustained control
+used the identical benchmark binary (SHA256
+`208235a311670068aede46600d467d6b0d31a7d34ffe7da31331ce8828e3a794`),
+prompt, context intervals, 512-token prefill chunks and 128 greedy decode tokens.
+It admitted 4548 experts (54.96 GiB) and measured:
+
+| Context | Prefill tokens/s | Decode tokens/s |
+| ---: | ---: | ---: |
+| 2048 | 18.66 | 7.49 |
+| 4096 | 11.84 | 4.04 |
+| 6144 | 8.92 | 4.25 |
+| 8192 | 9.41 | 4.40 |
+
+The [restored-Automatic CSV](../speed-bench/m5_max_muse_ud_iq2_xxs_auto_restored.csv)
+preserves this control separately from the earlier Automatic sweep. All
+808,192 frontier logits matched the original reference bit-for-bit. The
+841.71-second validation run had 43 memory samples, peaking at 75.43 GiB RSS,
+with no increase in system swapouts. Automatic mode was verified before and
+after the run, and all benchmark and telemetry processes were stopped.
+
+High Power was faster in these sustained sweeps: 7.15 versus 4.40 decode
+tokens/s at 8K. Its larger admitted expert cache (4946 versus 4548 experts),
+different starting hardware state and non-randomized run order limit causal
+attribution to power mode alone. Together with the opposite saved-state
+result, this is evidence of workload-dependent behavior, not a uniform
+power-mode speedup. Neither sustained sweep reaches the 10 tokens/s target.
