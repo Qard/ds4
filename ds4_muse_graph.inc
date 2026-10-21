@@ -1,5 +1,6 @@
 /* Muse graph: reused FP32 transients, layer-private F16 KV, and the existing
  * bounded expert cache. No model tensor is expanded into an unquantized bank. */
+#define MUSE_DEFAULT_PREFILL_CHUNK 512u
 #define MUSE_GRAPH_SCRATCH(X) \
     X(tokens,T) X(r,T*DS4_N_EMBD) X(xn,T*DS4_N_EMBD) X(branch,T*DS4_N_EMBD) \
     X(q,T*DS4_N_HEAD*DS4_N_HEAD_DIM) X(k,T*DS4_N_HEAD_KV*DS4_N_HEAD_DIM) \
@@ -39,7 +40,7 @@ static DS4_MAYBE_UNUSED uint64_t muse_graph_bytes(uint32_t context,uint32_t cap)
 
 static ds4_context_memory muse_graph_memory(uint32_t ctx, uint32_t prefill) {
     ds4_context_memory m = {0};
-    uint32_t cap = MIN(ctx, prefill ? prefill : 32u);
+    uint32_t cap = MIN(ctx, prefill ? prefill : MUSE_DEFAULT_PREFILL_CHUNK);
     m.prefill_cap = cap;
     m.raw_cap = ctx;
     for (unsigned il = 0; il < DS4_N_LAYER; il++)

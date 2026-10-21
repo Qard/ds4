@@ -3,7 +3,7 @@
 static bool ds4_session_cancelled(ds4_session *s);
 
 static uint32_t muse_session_prefill_cap(const ds4_engine *e,uint32_t context) {
-    return MIN(context,e->prefill_chunk?e->prefill_chunk:32u);
+    return MIN(context,e->prefill_chunk?e->prefill_chunk:MUSE_DEFAULT_PREFILL_CHUNK);
 }
 
 static uint64_t muse_session_memory_bytes(uint32_t context,uint32_t cap) {

@@ -10,6 +10,12 @@ int main(int argc,char **argv) {
     ds4_context_memory estimate=ds4_context_memory_estimate_with_prefill_mode(DS4_BACKEND_METAL,32768,32,true);
     assert(estimate.total_bytes==muse_graph_bytes(32768,32));
     assert(estimate.raw_bytes+estimate.scratch_bytes==estimate.total_bytes && estimate.prefill_cap==32);
+    ds4_context_memory defaults=ds4_context_memory_estimate_with_prefill_mode(DS4_BACKEND_METAL,8192,0,true);
+    assert(defaults.prefill_cap==512 && defaults.total_bytes==muse_graph_bytes(8192,512));
+    assert(muse_session_prefill_cap(&e,8192)==512);
+    assert(muse_session_prefill_cap(&e,100)==100);
+    assert(muse_session_memory_bytes(8192,muse_session_prefill_cap(&e,8192))==muse_session_memory_bytes(8192,512));
+    e.prefill_chunk=17;assert(muse_session_prefill_cap(&e,8192)==17);e.prefill_chunk=0;
     uint64_t graph=muse_session_memory_bytes(32768,32),resident=0,expert=0;
     assert(weights_streaming_non_routed_bytes(&e.weights,&resident));
     assert(ds4_streaming_routed_expert_bytes(&e.weights,&expert));

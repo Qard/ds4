@@ -48,7 +48,7 @@ The native command to validate once sufficient memory is available is:
 
 ```sh
 ./ds4 --model ~/.ds4/models/muse-spark-open-native.gguf --metal \
-  --ctx 4096 --prefill-chunk 32 --nothink --tokens 256 -p 'Hello'
+  --ctx 4096 --nothink --tokens 256 -p 'Hello'
 ```
 
 Muse selects SSD expert streaming automatically. The standard `ds4-server` and
@@ -104,9 +104,9 @@ frontend chooses a larger context after tokenization, the first session can
 refit the cache before allocating its graph. Live sessions never resize that
 cache underneath another session.
 
-A completed full-checkpoint context sweep is reported below. Final performance
-validation of the cache-aging update is still pending; fixture throughput alone
-does not establish full-model performance.
+Completed full-checkpoint context sweeps are reported below. Muse defaults to
+512-token prefill chunks; explicit `--prefill-chunk` settings override this.
+Both graph admission and session allocation use that same default.
 
 ## Checkpoint-free verification
 
@@ -303,14 +303,20 @@ tokens; reported prefill rates apply to the additional tokens at that frontier.
 All frontiers completed, including snapshots restored between frontiers and
 execution beyond the 2048-token sliding window. At the 1024 frontier, all 202,048
 logits matched exactly between prefill chunks 32, 512 and 2048. The 8192 frontier
-still requires its second-chunk comparison.
+also matched exactly against a fresh 128-token-chunk run, across all 202,048
+logits, with the cache-aging update enabled.
 
 The memory collector retained 35 samples over approximately 17 minutes of this
 run, with a sampled peak resident size of 84.42 GiB and no increase in the system
 Swapouts counter during that sampled interval. This does not mean the machine
 had no preexisting swap use or that the collector covered the entire process.
 The completed sweep preceded the frequency-cache aging fix; that policy update
-has bounded eviction tests, but its full-checkpoint rerun remains pending.
+passed its full-checkpoint rerun: 8192 prompt tokens plus 64 continuation tokens
+completed in 1543 seconds, with 5.44 prefill tokens/s and 3.27 decode tokens/s.
+The complete 78-sample record peaked at 83.49 GiB process RSS, with no increase
+in Swapouts. A mid-run VM map showed a read-only mapped-weight region resident at 18.3 GiB
+and a 66.6 GiB physical footprint; GPU alias mappings
+are not additional unique allocations.
 
 
 The recipient-separation build passed a fresh 27-request API run across all three
@@ -375,3 +381,9 @@ exact-text checks, and additionally verifies the complete token prefix before
 reporting a hit. It does not replace the conversation transcript. Missing or
 invalid cache files fall back to the ordinary sync. The native loader, graph
 and arithmetic are unchanged by this optimization.
+
+Parallel tool results are rendered in the preceding assistant call order, even
+when replies arrive in reverse order. Output-only Responses and Anthropic
+continuations retain owned ID/name bindings at the existing live KV frontier;
+reused IDs in replayed history resolve to the nearest preceding assistant call.
+These rules have checkpoint-free regressions, including both live API styles.

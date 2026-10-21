@@ -176,7 +176,7 @@ static void print_model_runtime(FILE *fp, const help_colors *c,
     opt(fp, c, "--ssd-streaming-full-layers N", "GLM Metal streaming: keep the first N routed layers fully resident. Default: auto from NGB expert budget; use 0 to disable.");
     opt(fp, c, "--ssd-streaming-preload-experts N", "SSD streaming: upfront popularity preload count. DeepSeek auto-seeds by default; GLM demand-fills unless N is explicit.");
     opt(fp, c, "--simulate-used-memory NGB", "Diagnostic: lock N GiB before model load to simulate a smaller-memory machine.");
-    opt(fp, c, "--prefill-chunk N", "Graph prefill chunk size. Default: CUDA TP 2048; PRO long prompts 8192; others 4096.");
+    opt(fp, c, "--prefill-chunk N", "Graph prefill chunk size. Default: Muse 512; CUDA TP 2048; PRO long prompts 8192; others 4096.");
     if (full) {
         if (tool == DS4_HELP_EVAL || tool == DS4_HELP_BENCH) {
             opt(fp, c, "--mtp-model FILE", "External MTP or DSpark support GGUF.");
@@ -414,8 +414,8 @@ static void print_eval_specific(FILE *fp, const help_colors *c) {
     opt(fp, c, "--trace FILE", "Write questions, outputs, and grading decisions.");
     opt(fp, c, "--regrade-trace FILE", "Regrade a prior trace without loading the model.");
     opt(fp, c, "--soft-limit-reply-budget N", "Soft close thinking near the end of reply budget. Default: 1024");
-    opt(fp, c, "--hard-limit-reply-budget N", "Force </think> with N tokens left. Default: 512");
-    opt(fp, c, "--soft-limit-think-close-rank N", "Soft-close when </think> is in top N tokens. Default: 3");
+    opt(fp, c, "--hard-limit-reply-budget N", "Force the final-answer boundary with N tokens left. Default: 512");
+    opt(fp, c, "--soft-limit-think-close-rank N", "Soft-close when the final-answer boundary is in top N tokens. Default: 3");
     opt(fp, c, "--pause-ms N", "Pause after each result in the TTY UI. Default: 350");
     opt(fp, c, "--plain", "Disable split-screen ANSI UI.");
     opt(fp, c, "--self-test-extractors", "Run answer-extractor self-tests and exit.");
