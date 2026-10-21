@@ -395,5 +395,8 @@ Muse spent all 512 internal tokens outside the public summary body. Internal
 compaction now supplies `assistant to=user` plus its message boundary and seeds
 the existing decoder from that prefix. Both reserve accounting and generation
 use the same prefix helper. Ordinary assistant prefixes remain open for native
-reasoning and tool selection. The prefix/body regression passes; real-checkpoint
-revalidation is pending. The failed run is retained as evidence.
+reasoning and tool selection. The prefix/body regression and real-checkpoint revalidation passed. The fixed
+4096-context high-reasoning run completed compaction with a 56-token summary,
+restored all 1341 system tokens in 55 ms, rebuilt a 503-token suffix, and created
+and read back `COMPACTION_OK` through native tools. The failed run is retained
+as evidence.
