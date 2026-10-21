@@ -10283,6 +10283,26 @@ static bool agent_worker_compact_transcript(agent_worker *w, const char *reason,
     w->images = new_images;
     w->image_count = new_image_count;
     w->image_cap = old_image_count;
+    if (ds4_engine_is_muse(w->engine) && w->sysprompt_path) {
+        /* Long Muse turns overwrite the sliding-window history needed to
+         * rewind to the system prefix. Reuse the existing validated bootstrap
+         * checkpoint instead of recomputing it on every compaction rebuild.
+         * Loading without an output transcript keeps this transaction intact;
+         * any cache miss falls back to the ordinary sync below. */
+        size_t text_len = 0;
+        char *text = ds4_kvstore_render_tokens_text(w->engine, &sys, &text_len);
+        char load_err[160] = {0};double load_start = now_sec();
+        bool loaded = text && agent_kv_load_path(w, w->sysprompt_path, NULL,
+                            text, text_len, NULL, NULL, load_err, sizeof(load_err));
+        if (loaded && ds4_session_pos(w->session) == sys.len &&
+            ds4_session_common_prefix(w->session, &sys) == sys.len)
+            agent_trace(w, "compaction sysprompt kv hit tokens=%d load_ms=%.3f",
+                        sys.len, (now_sec()-load_start)*1000.0);
+        else
+            agent_trace(w, "compaction sysprompt kv miss reason=\"%s\"",
+                        load_err[0] ? load_err : "token prefix mismatch");
+        free(text);
+    }
     if (agent_worker_sync_tokens(w, &w->transcript, true, err, err_len) != 0) {
         ds4_session_invalidate(w->session);
         ds4_tokens_free(&w->transcript);

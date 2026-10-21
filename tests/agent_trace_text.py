@@ -1,4 +1,4 @@
-"""Extract generated C from raw agent test traces, preserving literal body tags."""
+"""Check live agent traces and extract generated C without changing body tags."""
 import re
 
 
@@ -26,3 +26,15 @@ def generated_code_text(raw,think,family):
         elif public:parts.append(piece)
     if reading_header:raise ValueError('incomplete recipient header')
     return ''.join(parts)
+
+
+def compaction_reused_system_prefix(trace,system_tokens):
+    """Require successful rebuild work, with the complete system prefix cached.
+
+    The tool-round sync has a different record shape and must not hide a cold
+    compaction rebuild that happened immediately before it.
+    """
+    if system_tokens<=0:return False
+    records=re.findall(r'prefill sync done prompt=(\d+) cached=(\d+) suffix=(\d+) rc=(\d+)\b',trace)
+    return bool(records) and all(rc==0 and cached>=system_tokens and suffix>0 and prompt==cached+suffix
+               for prompt,cached,suffix,rc in (map(int,row) for row in records))

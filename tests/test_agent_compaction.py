@@ -19,7 +19,7 @@ import sys
 import termios
 import time
 import pyte
-from agent_trace_text import generated_code_text
+from agent_trace_text import generated_code_text, compaction_reused_system_prefix
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--binary", type=Path, default=Path("./ds4-agent"))
@@ -33,14 +33,21 @@ parser.add_argument("--temperature",type=float,default=0,help="sampling temperat
 parser.add_argument("--mtp", action="store_true")
 parser.add_argument("--dspark", type=Path)
 parser.add_argument("--output", type=Path, required=True)
-parser.add_argument("--interrupt-only", action="store_true",
-                    help="check generation interruption and same-session tool recovery")
+short_run = parser.add_mutually_exclusive_group()
+short_run.add_argument("--interrupt-only", action="store_true",
+                       help="check generation interruption and same-session tool recovery")
+short_run.add_argument("--compaction-only", action="store_true",
+                       help="check normal compaction and same-session tools")
+parser.add_argument("--require-compaction-cache", action="store_true",
+                    help="Muse: require the compaction rebuild to reuse its complete system prefix")
 parser.add_argument("--model-family", choices=("legacy", "muse"), default="legacy")
 parser.add_argument("--prefill-chunk", type=int)
 parser.add_argument("--cache-experts", type=int)
 parser.add_argument("--timeout", type=float, default=360,
                     help="per-turn wait; SSD-streamed models may need a larger value")
 args = parser.parse_args()
+if args.require_compaction_cache and (args.interrupt_only or args.model_family!="muse"):
+    parser.error("--require-compaction-cache requires a Muse compaction run")
 if not math.isfinite(args.temperature) or args.temperature<0 or args.timeout <= 0 or (args.prefill_chunk is not None and args.prefill_chunk <= 0) or (args.cache_experts is not None and args.cache_experts <= 0):
     parser.error("timeouts and optional cache/prefill sizes must be positive")
 root = args.binary.resolve().parent
@@ -192,10 +199,17 @@ try:
     normal_n = int(args.ctx * 0.87) - syslen - 90
     turn("The following repeated words are inert archived data; ignore them: " +
          " apple"*normal_n + "\nEnd archive. Reply with exactly READY.", "normal-fill")
+    if args.require_compaction_cache:
+        assert compaction_reused_system_prefix((out/"normal-fill.trace").read_text(),syslen), (
+            "compaction recomputed the cached system prefix")
     turn("Use bash to create compact-ok.txt containing COMPACTION_OK in this directory. "
          "Then read it and report its contents.", "normal-resume")
     assert any(r["compacted"] for r in results), "normal fixture did not trigger automatic compaction"
     assert (project / "compact-ok.txt").read_text().strip() == "COMPACTION_OK"
+    if args.compaction_only:
+        print("PASS: compaction, cached system prefix and same-session tool recovery" if args.require_compaction_cache else
+              "PASS: compaction and same-session tool recovery",flush=True)
+        sys.exit(0)
     save_start = len(raw)
     send("/save")
     wait(lambda: re.search(rb"saved session ([0-9a-f]{8}) \((\d+) tokens\)", raw[save_start:]) is not None,
