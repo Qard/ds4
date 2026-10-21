@@ -583,3 +583,30 @@ prefill exactly. Its admitted expert cache was 54.42 GiB versus 55.37 GiB in the
 earlier 4.58/2.96 observation, so the controlled same-engine comparison is the
 stronger attribution of speedup. Metal, quantization, graph, KV/session, memory,
 and long-attention regressions passed.
+
+The subsequent sustained sweep uses the published literary text, 2048-token
+continued-prefill intervals, 128 greedy tokens per frontier, and default
+512-token prefill chunks. A fixed 4096-expert cache (49.50 GiB) keeps its memory
+allowance reproducible. On the Q6_K build `d6aec0e`:
+
+| Context | Prefill tokens/s | Decode tokens/s |
+| ---: | ---: | ---: |
+| 2048 | 13.36 | 5.09 |
+| 4096 | 6.65 | 4.31 |
+| 6144 | 7.92 | 4.29 |
+| 8192 | 7.56 | 4.32 |
+
+The sweep passed in 1122.2 seconds; 57 memory samples peaked at 69.94 GiB RSS.
+System Swapouts increased by 152 16-KiB pages (2.38 MiB). The final frontier
+does not save a snapshot because there is no following prefill interval.
+These results supersede the short-run speeds as the current sustained result;
+10 decode tokens/s remains a target. They do not form a controlled speedup ratio
+against the earlier archive-text, teacher-forced run with a larger expert cache.
+
+Post-Q6 profiling attributes approximately 27% of GPU encoder time to Q6_K
+projections, 22% to Q8 projections, 33% to experts, and 10% to input normalization
+at a short prefix. Those instrumented proportions guide further investigation;
+they are not 8K throughput measurements. A partial process-I/O sampler covering
+the 4K/6K/8K probes recorded approximately 22.3/31.8/27.6 GiB of attributed disk
+reads across each roughly 29-second probe interval. Snapshot and sampling
+boundaries make those approximate per-probe observations.
