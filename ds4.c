@@ -74660,7 +74660,7 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
         uint32_t cap=muse_session_prefill_cap(e,(uint32_t)ctx_size);
         uint64_t bytes=muse_session_memory_bytes(ctx_size,cap);
         if(ctx_size>1048576 || !muse_session_admit(e,bytes) ||
-            !muse_graph_alloc(&s->muse_graph,ctx_size,cap)) {free(s);return 1;}
+            !muse_graph_alloc(&s->muse_graph,ctx_size,cap,1)) {free(s);return 1;}
         const char *flash=getenv("DS4_MUSE_FLASH_ATTN");
         s->muse_graph.flash_attention=!e->quality && flash && !strcmp(flash,"1");
         s->muse_graph_ready=true;s->muse_allocation_bytes=bytes;

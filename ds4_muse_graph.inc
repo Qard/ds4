@@ -11,10 +11,10 @@
     X(selected,T*DS4_N_EXPERT_USED) X(weights,T*DS4_N_EXPERT_USED) \
     X(moe_lists,T*DS4_N_EXPERT_USED*DS4_N_EXPERT) X(moe_counts,DS4_N_EXPERT) \
     X(mid,T*DS4_N_EXPERT_USED*DS4_N_FF_EXP) X(part,T*DS4_N_EXPERT_USED*DS4_N_MOE_LATENT) \
-    X(moe,T*DS4_N_MOE_LATENT) X(logits,T*DS4_N_VOCAB)
+    X(moe,T*DS4_N_MOE_LATENT) X(logits,L*DS4_N_VOCAB)
 
 typedef struct {
-    uint32_t pos, kv_highwater, swa_history_start, ctx_cap, cap_tokens;
+    uint32_t pos, kv_highwater, swa_history_start, ctx_cap, cap_tokens, n_logit_rows;
     bool valid, cancelled;
     bool flash_attention; /* Immutable math profile for this session and its KV. */
     ds4_session_cancel_fn cancel;
@@ -30,8 +30,10 @@ static uint32_t muse_graph_cache_cap(unsigned layer,uint32_t context,uint32_t ca
     return g_muse_swa[layer] ? MIN((uint64_t)context,(uint64_t)DS4_N_SWA+cap) : context;
 }
 
+/* Session admission counts one final logit row, matching the other native
+ * graphs. Diagnostics explicitly reserve additional rows when allocating. */
 static DS4_MAYBE_UNUSED uint64_t muse_graph_bytes(uint32_t context,uint32_t cap) {
-    uint64_t bytes=0,T=cap;
+    uint64_t bytes=0,T=cap,L=1;
 #define MUSE_COUNT(field,count) bytes+=(uint64_t)(count)*4;
     MUSE_GRAPH_SCRATCH(MUSE_COUNT)
 #undef MUSE_COUNT
@@ -62,11 +64,13 @@ static void muse_graph_free(ds4_muse_gpu_graph *g) {
     memset(g,0,sizeof(*g));
 }
 
-static DS4_MAYBE_UNUSED bool muse_graph_alloc(ds4_muse_gpu_graph *g,uint32_t context,uint32_t cap) {
+static DS4_MAYBE_UNUSED bool muse_graph_alloc(ds4_muse_gpu_graph *g,uint32_t context,uint32_t cap,
+        uint32_t logit_rows) {
     memset(g,0,sizeof(*g));
-    if (!context || context>1048576 || !cap || cap>context || cap>8192) return false;
-    uint64_t T=cap;
-    g->ctx_cap=context; g->cap_tokens=cap;
+    if (!context || context>1048576 || !cap || cap>context || cap>8192 ||
+        !logit_rows || logit_rows>cap) return false;
+    uint64_t T=cap,L=logit_rows;
+    g->ctx_cap=context; g->cap_tokens=cap; g->n_logit_rows=logit_rows;
 #define MUSE_ALLOC(field,count) if (!(g->field=ds4_gpu_tensor_alloc((uint64_t)(count)*4))) goto fail;
     MUSE_GRAPH_SCRATCH(MUSE_ALLOC)
 #undef MUSE_ALLOC
@@ -130,7 +134,8 @@ static bool muse_latent_with_prefetch(ds4_muse_gpu_graph *g,const ds4_model *m,
 static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_model *m,const ds4_weights *w,
         const int *tokens,uint32_t T,float *out,bool all_rows) {
     if (g) g->cancelled=false;
-    if (!g || !g->valid || !T || T>g->cap_tokens || g->pos>g->ctx_cap || T>g->ctx_cap-g->pos) return false;
+    if (!g || !g->valid || !T || T>g->cap_tokens ||
+        (all_rows && T>g->n_logit_rows) || g->pos>g->ctx_cap || T>g->ctx_cap-g->pos) return false;
     for(unsigned t=0;t<T;t++) if(tokens[t]<0 || (unsigned)tokens[t]>=DS4_N_VOCAB) return false;
     if (!ds4_gpu_tensor_write(g->tokens,0,tokens,(uint64_t)T*4) || !ds4_gpu_begin_commands()) return false;
     bool ok=ds4_gpu_embed_tokens_quant_tensor(g->r,g->tokens,m->map,m->size,

@@ -12,6 +12,15 @@ int main(int argc,char **argv) {
     assert(estimate.raw_bytes+estimate.scratch_bytes==estimate.total_bytes && estimate.prefill_cap==32);
     ds4_context_memory defaults=ds4_context_memory_estimate_with_prefill_mode(DS4_BACKEND_METAL,8192,0,true);
     assert(defaults.prefill_cap==512 && defaults.total_bytes==muse_graph_bytes(8192,512));
+    /* Production requests only the final logit row. A large prefill must
+     * not reserve a vocabulary-sized output for every input token. */
+    uint64_t per_token=1ull+6ull*DS4_N_EMBD+
+        (uint64_t)DS4_N_HEAD_KV*(DS4_N_HEAD_DIM+DS4_N_VALUE_DIM)+
+        (uint64_t)DS4_N_HEAD*32*(DS4_N_HEAD_DIM+2)+
+        2ull*DS4_N_MOE_LATENT+2ull*DS4_N_EXPERT+2ull*DS4_N_EXPERT_USED+
+        (uint64_t)DS4_N_EXPERT_USED*(DS4_N_EXPERT+DS4_N_FF_EXP+DS4_N_MOE_LATENT);
+    ds4_context_memory large=muse_graph_memory(8192,8192);
+    assert(large.scratch_bytes==(8192*per_token+DS4_N_EXPERT+DS4_N_VOCAB)*4);
     assert(muse_session_prefill_cap(&e,8192)==512);
     assert(muse_session_prefill_cap(&e,100)==100);
     assert(muse_session_memory_bytes(8192,muse_session_prefill_cap(&e,8192))==muse_session_memory_bytes(8192,512));

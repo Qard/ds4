@@ -1191,3 +1191,26 @@ rotated measurements. The 8192-wide case improved at 512, 4096 and 8192 rows,
 so it retains staging. The decode policy (one main row and eight expert rows)
 and its full-model measurements above are unchanged. Large-batch reference,
 in-place and FP64 checks are included in `test-muse-norm`.
+
+
+Production Muse sessions now reserve one vocabulary-sized logit row, following
+the existing Qwen graph's allocation policy. Prefill computes only the final
+row for session callers; diagnostics explicitly reserve additional rows for
+all-row checks. Memory admission now counts this actual capacity instead of
+an unused output row per prefill token. At an 8192-token chunk this removes
+6.16 GiB from the graph reservation, which the existing admission logic can
+use for expert caching. The memory limit and checkpoint format are unchanged.
+All-row requests exceeding the reserved output capacity fail before GPU work
+or KV/position changes. Graph and session checks cover the bounded allocation,
+explicit diagnostic rows, checkpoint continuation and the independent memory
+estimate. This allocation change does not itself establish a throughput gain.
+
+Before that allocation reduction, the production `ds4-bench` completed an
+8192-token prefill in one chunk, then 1024 real-text teacher-forced decode
+steps: 14.49 prefill tokens/s and 5.20 decode tokens/s (5.22 excluding the first
+step). All 202048 prefill logits matched the saved 512-chunk reference bits.
+Its admitted layout was 79.53 GiB, including a 40.79 GiB expert cache and
+20.50 GiB session graph. The run completed in 781.54 seconds with no new
+system swapouts. The separate process-RSS peak was 59.11 GiB; it does not
+include all unmapped private GPU buffers. This is a single-session native
+measurement, not a paired attribution or evidence that 10 tokens/s is met.

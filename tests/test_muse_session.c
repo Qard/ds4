@@ -63,6 +63,7 @@ static void attention_profiles(ds4_engine *e,ds4_session *reference) {
     char err[256]={0};ds4_session *fast=NULL,*peer=NULL,*quality=NULL,*disabled=NULL;
     ds4_session_snapshot original={0},optimized={0},stable={0};
     assert(ds4_session_save_snapshot(reference,&original,err,sizeof(err))==0);
+    assert(ds4_gpu_tensor_bytes(reference->muse_graph.logits)==(uint64_t)DS4_N_VOCAB*4);
     setenv("DS4_MUSE_FLASH_ATTN","1",1);
     assert(ds4_session_create(&fast,e,1152)==0);
     assert(ds4_session_create(&peer,e,1152)==0);

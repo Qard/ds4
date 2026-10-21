@@ -24,9 +24,14 @@ int main(int argc, char **argv) {
     assert(ds4_gpu_set_model_map(m.map,m.size) && ds4_gpu_set_model_fd(m.fd));
     unsigned chunk=atoi(argv[4]);
     ds4_muse_gpu_graph g,last_graph;
+    ds4_muse_gpu_graph invalid_graph;
+    assert(!muse_graph_alloc(&invalid_graph,16,chunk,0));
+    assert(!muse_graph_alloc(&invalid_graph,16,chunk,chunk+1));
     assert(muse_graph_bytes(32,3)-muse_graph_bytes(16,3)==16*(d/2)*4);
-    assert(muse_graph_alloc(&g,16,chunk));
-    assert(muse_graph_alloc(&last_graph,16,chunk));
+    assert(muse_graph_alloc(&g,16,chunk,chunk));
+    assert(muse_graph_alloc(&last_graph,16,chunk,1));
+    assert(ds4_gpu_tensor_bytes(g.logits)==(uint64_t)chunk*DS4_N_VOCAB*4);
+    assert(ds4_gpu_tensor_bytes(last_graph.logits)==(uint64_t)DS4_N_VOCAB*4);
     FILE *out=fopen(argv[2],"wb"); assert(out);
     int ids[]={1,2,3,4,5,6,7,8,9,10}; float logits[10*32],first_logits[32];
     for(unsigned first=0;first<10;) {
@@ -36,6 +41,11 @@ int main(int argc, char **argv) {
         assert(observed_layers==DS4_N_LAYER);
         if(!first) memcpy(first_logits,logits,sizeof(first_logits));
         float last[32];
+        if(n>1) {
+            uint32_t position=last_graph.pos;
+            assert(!muse_graph_forward(&last_graph,&m,&w,ids+first,n,last,true));
+            assert(last_graph.valid && last_graph.pos==position);
+        }
         assert(muse_graph_forward(&last_graph,&m,&w,ids+first,n,last,false));
         /* Every Q8 row now uses the same FP32 reduction in both paths. */
         assert(memcmp(last,logits+(n-1)*32,sizeof(last))==0);
@@ -44,7 +54,7 @@ int main(int argc, char **argv) {
     }
     if(streamed) {
         ds4_gpu_set_streaming_expert_cache_budget(2);
-        ds4_muse_gpu_graph failure;assert(muse_graph_alloc(&failure,16,1));
+        ds4_muse_gpu_graph failure;assert(muse_graph_alloc(&failure,16,1,1));
         ds4_tensor invalid=*w.layer[0].ffn_pre_exp_norm;invalid.abs_offset=m.size;
         ds4_weights broken=w;broken.layer[0].ffn_pre_exp_norm=&invalid;
         assert(!muse_graph_forward(&failure,&m,&broken,ids,1,NULL,false));
@@ -52,7 +62,7 @@ int main(int argc, char **argv) {
         assert(ds4_gpu_stream_expert_cache_current_count()<=DS4_N_EXPERT_USED);
         muse_graph_free(&failure);
         ds4_gpu_set_streaming_expert_cache_budget(2);
-        assert(muse_graph_alloc(&failure,16,1));
+        assert(muse_graph_alloc(&failure,16,1,1));
         invalid=*w.layer[0].ffn_gate_exps;invalid.type=UINT32_MAX;
         broken=w;broken.layer[0].ffn_gate_exps=&invalid;
         assert(!muse_graph_forward(&failure,&m,&broken,ids,1,NULL,false));
@@ -62,7 +72,7 @@ int main(int argc, char **argv) {
          * entries prove pending reads were joined on the latter failure. */
         assert(ds4_gpu_stream_expert_cache_current_count()==DS4_N_EXPERT_USED);
         muse_graph_free(&failure);
-        assert(muse_graph_alloc(&failure,16,1));float recovered[32];
+        assert(muse_graph_alloc(&failure,16,1,1));float recovered[32];
         assert(muse_graph_forward(&failure,&m,&w,ids,1,recovered,false));
         for(unsigned i=0;i<32;i++) assert(fabsf(recovered[i]-first_logits[i])<2e-5f);
         muse_graph_free(&failure);
