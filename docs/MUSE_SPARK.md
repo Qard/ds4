@@ -1003,3 +1003,30 @@ established by separate exact paired tests; they do not erase the sustained
 slowdown or make separate sweeps with different cache allowances and hardware
 histories controlled speedup measurements. No power, fan, sleep, precision or
 weight-storage policy was changed to obtain these results.
+
+
+A subsequent user-authorized High Power Mode test on AC used the same binary
+and default benchmark procedure. Battery power mode remained Automatic.
+The sustained sweep admitted 4946 experts (59.77 GiB) and measured:
+
+| Context | Prefill tokens/s | Decode tokens/s |
+| ---: | ---: | ---: |
+| 2048 | 18.71 | 8.27 |
+| 4096 | 17.34 | 7.80 |
+| 6144 | 15.81 | 7.17 |
+| 8192 | 15.40 | 7.15 |
+
+The [High Power CSV](../speed-bench/m5_max_muse_ud_iq2_xxs_high_power.csv)
+records this separately. All 808,192 frontier logits matched the original
+reference bit-for-bit. The 561.15-second validation run had 29 memory samples,
+peaking at 80.88 GiB RSS, with no increase in system swapouts. This result is
+below the 10 tokens/s objective.
+
+An earlier saved-8K test in Automatic mode measured 8.16 tokens/s, while the
+following High Power saved-state test measured 6.10 tokens/s. Each completed
+32 warmup and 512 measured steps per session, checked 110,116,160 logits
+exactly between sessions, and selected the same 544 input token IDs across
+runs. Automatic cache admission differed (4351 versus 4653 experts), and the
+runs had different hardware histories. These observations do not establish
+a consistent power-mode speedup; a fresh restored-Automatic sweep is needed
+before attributing the sustained difference to High Power Mode.
