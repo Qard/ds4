@@ -16,7 +16,8 @@
 typedef struct {
     uint32_t pos, kv_highwater, swa_history_start, ctx_cap, cap_tokens, n_logit_rows;
     bool valid, cancelled;
-    bool flash_attention; /* Immutable math profile for this session and its KV. */
+    /* Immutable math profile for this session and its persisted KV. */
+    bool flash_attention, matmul_prefill;
     ds4_session_cancel_fn cancel;
     void *cancel_ud;
 #define MUSE_FIELD(field,count) ds4_gpu_tensor *field;
@@ -89,9 +90,9 @@ fail:
 }
 
 static bool muse_gemv(ds4_gpu_tensor *out,const ds4_model *m,const ds4_tensor *w,
-        const ds4_gpu_tensor *x,uint32_t tokens) {
+        const ds4_gpu_tensor *x,uint32_t tokens, bool matmul_prefill) {
     return ds4_gpu_muse_linear_tensor(out,m->map,m->size,w->abs_offset,w->type,
-                                      w->dim[0],w->dim[1],x,tokens);
+                                      w->dim[0],w->dim[1],x,tokens, matmul_prefill);
 }
 
 static bool muse_norm(ds4_gpu_tensor *out,const ds4_gpu_tensor *x,const ds4_model *m,
@@ -110,7 +111,7 @@ static bool muse_attention_projections(ds4_muse_gpu_graph *g,const ds4_model *m,
         widths[i]=weights[i]->dim[1];
     }
     return ds4_gpu_muse_linears_tensor(outputs,m->map,m->size,offsets,types,
-        widths,4,DS4_N_EMBD,g->xn,tokens);
+        widths,4,DS4_N_EMBD,g->xn,tokens, g->matmul_prefill);
 }
 
 static bool muse_latent_with_prefetch(ds4_muse_gpu_graph *g,const ds4_model *m,
@@ -124,7 +125,7 @@ static bool muse_latent_with_prefetch(ds4_muse_gpu_graph *g,const ds4_model *m,
     if(overlap) {
         if(!ds4_gpu_signal_selected_readback_ready(&event)) return false;
     } else if(tokens==1&&!ds4_gpu_muse_prefetch_experts_tensor(&table,g->selected,DS4_N_EXPERT_USED,0)) return false;
-    if(!muse_gemv(g->latent,m,l->ffn_latent_down,g->xn,tokens)||
+    if(!muse_gemv(g->latent,m,l->ffn_latent_down,g->xn,tokens, g->matmul_prefill)||
        !muse_norm(g->latent,g->latent,m,l->ffn_pre_exp_norm,tokens,DS4_N_MOE_LATENT)) return false;
     if(overlap&&!ds4_gpu_muse_prefetch_experts_tensor(&table,g->selected,DS4_N_EXPERT_USED,event)) return false;
     *routing_event=event;
@@ -160,24 +161,24 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
                 DS4_N_HEAD,DS4_N_HEAD_KV,DS4_N_HEAD_DIM,g->pos,g->cache_cap[il],g_muse_swa[il]?DS4_N_SWA:0) &&
             ds4_gpu_rms_norm_plain_rows_tensor(g->attn,g->attn,DS4_N_VALUE_DIM,T*DS4_N_HEAD,DS4_RMS_EPS) &&
             ds4_gpu_muse_gate_tensor(g->attn,g->attn,g->gate,T*DS4_N_HEAD*DS4_N_VALUE_DIM) &&
-            muse_gemv(g->branch,m,l->attn_output,g->attn,T) &&
+            muse_gemv(g->branch,m,l->attn_output,g->attn,T, g->matmul_prefill) &&
             ds4_gpu_rms_norm_plain_rows_tensor(g->branch,g->branch,DS4_N_EMBD,T,g_ds4_shape.post_norm_eps) &&
             ds4_gpu_muse_residual_tensor(g->r,g->r,g->branch,m->map,m->size,
                 l->attn_resid_alpha->abs_offset,l->attn_resid_beta->abs_offset,T,DS4_N_EMBD) &&
             muse_norm(g->xn,g->r,m,l->ffn_norm,T,DS4_N_EMBD) &&
-            muse_gemv(g->router,m,l->ffn_gate_inp,g->xn,T) &&
+            muse_gemv(g->router,m,l->ffn_gate_inp,g->xn,T, g->matmul_prefill) &&
             ds4_gpu_glm_router_select_batch_tensor(g->selected,g->weights,g->probs,m->map,m->size,
                 l->ffn_exp_probs_b->abs_offset,g->router,DS4_N_EXPERT,DS4_N_EXPERT_USED,DS4_EXPERT_WEIGHT_SCALE,T) &&
             muse_latent_with_prefetch(g,m,l,il,T,&routing_event) &&
             ds4_gpu_muse_experts_tensor(g->mid,g->part,g->latent,g->selected,m->map,m->size,
                 l->ffn_gate_exps->abs_offset,l->ffn_up_exps->abs_offset,l->ffn_down_exps->abs_offset,
                 l->ffn_gate_exps->type,l->ffn_down_exps->type,T,DS4_N_EXPERT,DS4_N_EXPERT_USED,
-                DS4_N_MOE_LATENT,DS4_N_FF_EXP,il,g->moe_lists,g->moe_counts,routing_event) &&
+                DS4_N_MOE_LATENT,DS4_N_FF_EXP,il,g->moe_lists,g->moe_counts,routing_event, g->matmul_prefill) &&
             ds4_gpu_muse_input_norm_tensor(g->part,g->part,m->map,m->size,l->ffn_post_exp_norm->abs_offset,
                 T*DS4_N_EXPERT_USED,DS4_N_MOE_LATENT,g_ds4_shape.post_norm_eps) &&
             ds4_gpu_qwen4_moe_reduce_tensor(g->moe,g->part,g->weights,NULL,NULL,NULL,NULL,
                 T,DS4_N_EXPERT_USED,DS4_N_EXPERT_USED,DS4_N_MOE_LATENT,0) &&
-            muse_gemv(g->branch,m,l->ffn_latent_up,g->moe,T) &&
+            muse_gemv(g->branch,m,l->ffn_latent_up,g->moe,T, g->matmul_prefill) &&
             ds4_gpu_muse_input_norm_tensor(g->branch,g->branch,m->map,m->size,l->ffn_post_norm->abs_offset,
                 T,DS4_N_EMBD,g_ds4_shape.post_norm_eps) &&
             ds4_gpu_muse_residual_tensor(g->r,g->r,g->branch,m->map,m->size,
@@ -195,7 +196,7 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
         last=ds4_gpu_tensor_view(g->xn,(uint64_t)(T-1)*DS4_N_EMBD*4,(uint64_t)DS4_N_EMBD*4);
         ok=last!=NULL;
     }
-    if (ok) ok=muse_gemv(g->logits,m,w->output,last?last:g->xn,rows) &&
+    if (ok) ok=muse_gemv(g->logits,m,w->output,last?last:g->xn,rows, g->matmul_prefill) &&
         ds4_gpu_muse_logits_tensor(g->logits,rows*DS4_N_VOCAB,g_ds4_shape.logit_scale,g_ds4_shape.logit_softcap);
     ds4_gpu_tensor_free(last);
     if (ds4_gpu_commands_active()) ok=ds4_gpu_end_commands() && ok;

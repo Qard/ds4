@@ -1109,9 +1109,20 @@ and `--quality` overrides the environment flag. This profile is experimental
 until full-model quality validation is complete; it does not establish the
 10 tokens/s target.
 
-The profile is captured when a session is created. Checkpoints carry a distinct
-math-profile tag, and cross-profile imports fail before changing existing KV
-or logits. Recreate a checkpoint under the selected profile. Profiles cannot
+A second optional M5 profile, `DS4_MUSE_MATMUL_PREFILL=1`, enables full-FP32
+matrix prefill for Q6/Q8 projections and cached IQ2 experts at batches of at
+least 32 tokens. It reuses the existing dense/grouped matrix kernels, cache
+loader, address maps and resource fences. Q8 products combine 512-column FP32
+partials to retain the existing wide-dot numerical bound. The default shared
+matrix specialization and other models retain their original accumulation.
+No activation or dequantized tile is narrowed to F16, no expert weights are
+expanded, and single-token decoding retains its original matvec kernels.
+Small caches, unsupported route shapes and repeated expert slots retain the
+existing grouped path. `--quality` overrides both optional profile flags.
+
+The flags are independent and are captured when a session is created.
+Checkpoints distinguish reference, attention, matrix, and combined math
+profiles; cross-profile imports fail before changing existing KV or logits. Recreate a checkpoint under the selected profile. Profiles cannot
 be changed midway through a session by mutating the environment. The existing
 memory admission and shared scratch allocator remain in use; padding the last
 key tile requires at most about 2 MiB for Muse's sixteen KV heads, without
@@ -1250,8 +1261,9 @@ mid/output differences were 1.01e-5 and 6.08e-6, below the existing 1e-4 bound.
 Independent FP64 dots using the official GGUF decoder gave sampled gate/up
 errors below 1.8e-6. This dense component result is not a full-model speedup:
 Muse normally has 256 experts and fewer rows per expert. It is not a runtime
-policy. The existing quantized matvec remains in use; a separate generic Q6
-specialization failed to establish a material isolated decode improvement.
+policy by itself. Native matrix support is described above; single-token
+execution retains the quantized matvec. A separate generic Q6 specialization
+failed to establish a material isolated decode improvement.
 
 The native high-reasoning AIME 2025 smoke case also passed with the attention
 profile enabled: expected/picked answer 70, 221 prompt tokens and 1349 generated
@@ -1259,8 +1271,8 @@ tokens, crossing the fast-path context threshold. This is one task-level check,
 not a benchmark accuracy claim. Cache diagnostics recorded a 0.937 aggregate
 hit rate and about 27.9 seconds of accumulated pread timing; these counters
 include prefill and overlapping reads and cannot be subtracted as a clean
-serial decode bottleneck. The expert-matmul research remains separate from
-this validated production attention profile.
+serial decode bottleneck. That run used the attention profile alone; the
+subsequent matrix profile requires its own full-model quality checks.
 
 The private FP32 expert kernels also matched their own single-row results
 bit-for-bit at batch lengths 1, 3, 33 and 512: 71,958,528 mid/output floats
@@ -1282,3 +1294,53 @@ representative model quality. Paired decode measured 4.5410 versus 4.2536
 tokens/s with two large-prefill sessions resident; it does not establish the
 single-session rate or the 10 tokens/s target. This research uses a separate
 payload tag that production rejects and has not changed the default math.
+
+
+The native matrix profile passes the original FP64 error bounds in packed
+Q6/Q8 projection and IQ2 expert tests, including 32/33/65-row tile boundaries,
+offset output guards, small-cache splitting, and repeated expert IDs. A
+regression exposed that the shared route map assumes one selected slot per
+token/expert; the adapter verifies that invariant before selecting it. A second
+regression caught a wide-Q8 accumulation error of 9.63e-5 against an 8.55e-5
+bound. Blocked FP32 accumulation reduced the expanded Q8 test's maximum error
+to 1.04e-5 without changing its tolerance or adding global scratch. Wide Q6
+matrix products remained within their 1e-4 bound at 7.56e-5 maximum error.
+Sixteen complete quantized-graph matrix cases retain the 5e-5 FP64 bound,
+including cache-budget fallbacks. Session tests cover all four math identities,
+immutable policy, same-profile restore/continuation, quality override, and
+foreign-profile rejection before mutation. The original reference suites and
+shared Qwen kernel suite also pass. These operator and state checks precede
+the native full-checkpoint quality runs; the faster profiles remain optional.
+
+The exact attention-workspace reduction also passed an end-to-end full-model
+check: all 202048 fresh 8K-prefix logit bits matched the preceding research
+matrix run. Its single-session native benchmark measured 43.74 prefill and
+4.57 decode tokens/s over 1024 actual corpus continuation tokens. The run
+completed in 420.96 seconds with a sampled peak RSS of 75.05 GiB and no new
+swapouts. Automatic power remained enabled with AC reporting 65 W. GPU clocks
+again fell during the run. This was the earlier, unblocked Q8 research
+configuration; it is neither the final native matrix profile's benchmark nor
+a paired attribution of the allocation change, and it does not meet 10 TPS.
+
+
+The final native combined profile completed its own full-model checks using
+only the standard ds4 CPU/Metal implementation. High-reasoning AIME 2025-01
+passed with answer 70, 221 prompt tokens and 1227 generated tokens, exercising
+matrix prefill and the attention fast path beyond 1024 context tokens.
+
+A fresh 8192-token native prefix took 195.83 seconds (41.83 tokens/s). Its saved
+payload carries the combined profile tag; initial and one-step continuation
+restore checks matched all 404096 logit floats bit-for-bit. On 1024 actual book
+continuation tokens, mean next-token loss was 0.445675 versus 0.444989 nats for
+the reference: delta +0.000687, with a within-run 16-token block-bootstrap 95%
+interval of -0.001683 to +0.003024. Perplexity changed by +0.0687%, and four of
+1025 greedy-frontier IDs differed. This limited passage and task smoke check
+do not establish general model quality equivalence.
+
+Alternating native decode measured 5.5759 versus 5.1935 tokens/s, about 7.36%
+faster, over the same true-token continuation. The complete paired run took
+601.25 seconds, peaked at 72.35 GiB process RSS across 31 samples, and recorded
+no increase in system swapouts. Both optional flags remain disabled by default;
+Automatic power and the reported 65 W AC source were unchanged. The 10 TPS
+target remains unmet, and this paired two-session result does not establish
+the best single-session or High Power throughput.

@@ -3,10 +3,12 @@
 
 #include "ds4_gpu.h"
 
-/* GGUF graph activations use FP32; packed weights retain their native types. */
+/* GGUF graph activations use FP32; packed weights retain their native types.
+ * matmul_prefill is the immutable session math policy. It permits full-FP32
+ * matrix kernels for large batches; decode keeps the reference matvec. */
 int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t size,
     uint64_t offset, uint32_t type, uint32_t in_dim, uint32_t out_dim,
-    const ds4_gpu_tensor *x, uint32_t tokens);
+    const ds4_gpu_tensor *x, uint32_t tokens, bool matmul_prefill);
 /* One to four independent projections share an input. Output ranges must be
  * disjoint from the input and each other; nonoverlapping buffer views are OK.
  * Any concurrent section it starts ends before returning, including on failure.
@@ -14,7 +16,7 @@ int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t si
 int ds4_gpu_muse_linears_tensor(ds4_gpu_tensor *const *out,
     const void *map, uint64_t size, const uint64_t *offsets, const uint32_t *types,
     const uint32_t *widths, uint32_t count, uint32_t in_dim,
-    const ds4_gpu_tensor *x, uint32_t tokens);
+    const ds4_gpu_tensor *x, uint32_t tokens, bool matmul_prefill);
 int ds4_gpu_muse_input_norm_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,
     const void *map, uint64_t size, uint64_t weight_offset,
     uint32_t rows, uint32_t width, float eps);
@@ -62,6 +64,6 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
     uint32_t tokens, uint32_t total, uint32_t slots, uint32_t latent,
     uint32_t ff, uint32_t layer,ds4_gpu_tensor *lists,ds4_gpu_tensor *counts,
-    uint64_t routing_event);
+    uint64_t routing_event, bool matmul_prefill);
 
 #endif

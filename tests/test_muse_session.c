@@ -59,14 +59,16 @@ static void payload_roundtrips(ds4_engine *e,ds4_session *a,ds4_session *b,int *
 }
 /* A math profile belongs to the session and its persisted KV. Environment
  * changes cannot silently switch an existing session or import foreign logits. */
-static void attention_profiles(ds4_engine *e,ds4_session *reference) {
+static void math_profile(ds4_engine *e,ds4_session *reference,bool flash,bool matrix,uint32_t tag) {
     char err[256]={0};ds4_session *fast=NULL,*peer=NULL,*quality=NULL,*disabled=NULL;
     ds4_session_snapshot original={0},optimized={0},stable={0};
     assert(ds4_session_save_snapshot(reference,&original,err,sizeof(err))==0);
     assert(ds4_gpu_tensor_bytes(reference->muse_graph.logits)==(uint64_t)DS4_N_VOCAB*4);
-    setenv("DS4_MUSE_FLASH_ATTN","1",1);
+    setenv("DS4_MUSE_FLASH_ATTN",flash?"1":"0",1);
+    setenv("DS4_MUSE_MATMUL_PREFILL",matrix?"1":"0",1);
     assert(ds4_session_create(&fast,e,1152)==0);
     assert(ds4_session_create(&peer,e,1152)==0);
+    assert(fast->muse_graph.flash_attention==flash && fast->muse_graph.matmul_prefill==matrix);
     /* Cross-profile rejection must preserve the existing checkpoint. */
     int ids[1025];for(unsigned i=0;i<1025;i++) ids[i]=1+i%30;
     ds4_tokens prompt={.v=ids,.len=1025,.cap=1025};
@@ -74,7 +76,7 @@ static void attention_profiles(ds4_engine *e,ds4_session *reference) {
     assert(ds4_session_save_snapshot(fast,&optimized,err,sizeof(err))==0);
     uint32_t oldtag=0,newtag=0;
     memcpy(&oldtag,original.ptr+12*4,4);memcpy(&newtag,optimized.ptr+12*4,4);
-    assert(oldtag==0x4d555301u && newtag==0x4d555302u);
+    assert(oldtag==0x4d555301u && newtag==tag);
     assert(ds4_session_load_snapshot(fast,&original,err,sizeof(err))!=0);
     assert(ds4_session_checkpoint_valid(fast));
     assert(ds4_session_save_snapshot(fast,&stable,err,sizeof(err))==0);
@@ -83,22 +85,23 @@ static void attention_profiles(ds4_engine *e,ds4_session *reference) {
     assert(ds4_session_checkpoint_valid(reference));
     assert(ds4_session_load_snapshot(peer,&optimized,err,sizeof(err))==0);
     equal_logits(fast,peer);
-    unsetenv("DS4_MUSE_FLASH_ATTN");
+    unsetenv("DS4_MUSE_FLASH_ATTN");unsetenv("DS4_MUSE_MATMUL_PREFILL");
     assert(ds4_session_eval(fast,4,err,sizeof(err))==0);
     assert(ds4_session_eval(peer,4,err,sizeof(err))==0);equal_logits(fast,peer);
     ds4_session_snapshot_free(&stable);
     assert(ds4_session_save_snapshot(fast,&stable,err,sizeof(err))==0);
-    memcpy(&newtag,stable.ptr+12*4,4);assert(newtag==0x4d555302u);
+    memcpy(&newtag,stable.ptr+12*4,4);assert(newtag==tag);
     assert(ds4_session_load_snapshot(peer,&stable,err,sizeof(err))==0);
     assert(ds4_session_eval(fast,5,err,sizeof(err))==0);
     assert(ds4_session_eval(peer,5,err,sizeof(err))==0);equal_logits(fast,peer);
-    setenv("DS4_MUSE_FLASH_ATTN","1",1);e->quality=true;
+    setenv("DS4_MUSE_FLASH_ATTN",flash?"1":"0",1);
+    setenv("DS4_MUSE_MATMUL_PREFILL",matrix?"1":"0",1);e->quality=true;
     assert(ds4_session_create(&quality,e,24)==0);e->quality=false;
     assert(ds4_session_load_snapshot(quality,&original,err,sizeof(err))==0);
-    setenv("DS4_MUSE_FLASH_ATTN","0",1);
+    setenv("DS4_MUSE_FLASH_ATTN","0",1);setenv("DS4_MUSE_MATMUL_PREFILL","0",1);
     assert(ds4_session_create(&disabled,e,24)==0);
     assert(ds4_session_load_snapshot(disabled,&original,err,sizeof(err))==0);
-    unsetenv("DS4_MUSE_FLASH_ATTN");
+    unsetenv("DS4_MUSE_FLASH_ATTN");unsetenv("DS4_MUSE_MATMUL_PREFILL");
     ds4_session_snapshot_free(&original);ds4_session_snapshot_free(&optimized);
     ds4_session_snapshot_free(&stable);
     ds4_session_free(fast);ds4_session_free(peer);ds4_session_free(quality);ds4_session_free(disabled);
@@ -137,7 +140,7 @@ static void progress(void *ud,const char *event,int pos,int total) {
     if(!strcmp(event,"prefill_chunk") && pos<total) *(bool *)ud=true;
 }
 int main(int argc,char **argv) {
-    unsetenv("DS4_MUSE_FLASH_ATTN");
+    unsetenv("DS4_MUSE_FLASH_ATTN");unsetenv("DS4_MUSE_MATMUL_PREFILL");
     assert(argc==3); bool streamed=atoi(argv[2])!=0;
     g_ds4_shape=DS4_SHAPE_MUSE_SPARK;
     g_ds4_shape.n_layer=2; g_ds4_shape.n_embd=128; g_ds4_shape.n_vocab=32;
@@ -171,7 +174,9 @@ int main(int argc,char **argv) {
     prompt.len=8; assert(ds4_session_sync(a,&prompt,err,sizeof(err))==0);
     assert(ds4_session_eval(b,8,err,sizeof(err))==0); equal_logits(a,b);
     payload_roundtrips(&e,a,b,ids);
-    attention_profiles(&e,a);
+    math_profile(&e,a,true,false,0x4d555302u);
+    math_profile(&e,a,false,true,0x4d555303u);
+    math_profile(&e,a,true,true,0x4d555304u);
     ds4_session_rewind(a,6); assert(ds4_session_argmax(a)==-1);
     prompt.len=6; assert(ds4_session_sync(a,&prompt,err,sizeof(err))==0);
     rebuild(b,ids,6);equal_logits(a,b);

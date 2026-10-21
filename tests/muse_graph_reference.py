@@ -103,19 +103,20 @@ def norm(x,w=None,eps=1e-5,input_scale=False):
     return y if w is None or input_scale else y*w
 
 
-def reference(w):
-    ids=np.arange(1,11)
+def reference(w,ids=None):
+    if ids is None: ids=np.arange(1,11)
+    count=len(ids)
     d=w['token_embd.weight'].shape[1];heads=d//64;kv_heads=heads//2
     x=norm(w['token_embd.weight'][ids])
     for layer in range(2):
         def weight(name): return w[f'blk.{layer}.{name}.weight']
         h=norm(x,weight('attn_norm'))
-        q=(h@weight('attn_q').T).reshape(10,heads,64)
-        k=(h@weight('attn_k').T).reshape(10,kv_heads,64)
-        v=(h@weight('attn_v').T).reshape(10,kv_heads,64).astype(np.float16).astype(np.float64)
+        q=(h@weight('attn_q').T).reshape(count,heads,64)
+        k=(h@weight('attn_k').T).reshape(count,kv_heads,64)
+        v=(h@weight('attn_v').T).reshape(count,kv_heads,64).astype(np.float16).astype(np.float64)
         q=norm(q,weight('attn_q_norm')); k=norm(k,weight('attn_k_norm'))
         if layer==0:
-            angles=np.arange(10)[:,None,None]*500000.**(-np.arange(0,64,2)/64)
+            angles=np.arange(count)[:,None,None]*500000.**(-np.arange(0,64,2)/64)
             c,s=np.cos(angles),np.sin(angles)
             def rotate(a):
                 out=np.empty_like(a)
@@ -125,12 +126,12 @@ def reference(w):
             q,k=rotate(q),rotate(k)
         k=k.astype(np.float16).astype(np.float64)
         attention=np.zeros_like(q)
-        for t in range(10):
+        for t in range(count):
             lo=max(0,t-3) if layer==0 else 0
             score=np.einsum('hd,phd->hp',q[t],np.repeat(k[lo:t+1],2,axis=1))/8
             p=np.exp(score-score.max(axis=-1,keepdims=True)); p/=p.sum(axis=-1,keepdims=True)
             attention[t]=np.einsum('hp,phd->hd',p,np.repeat(v[lo:t+1],2,axis=1))
-        attention=norm(attention).reshape(10,d)
+        attention=norm(attention).reshape(count,d)
         gate=1/(1+np.exp(-(h@weight('attn_gate').T)))
         branch=(attention*gate)@weight('attn_output').T
         x=x*weight('attn_resid_alpha')+norm(branch,eps=1e-8)*weight('attn_resid_beta')
@@ -140,7 +141,7 @@ def reference(w):
         selected=np.argsort(-(probs+w[f'blk.{layer}.exp_probs_b.bias']),axis=-1,kind='stable')[:,:2]
         route=np.take_along_axis(probs,selected,axis=-1); route/=np.maximum(route.sum(axis=-1,keepdims=True),6.103515625e-5)
         combined=np.zeros_like(latent)
-        for t in range(10):
+        for t in range(count):
             for slot,e in enumerate(selected[t]):
                 g=weight('ffn_gate_exps')[e]@latent[t]
                 u=weight('ffn_up_exps')[e]@latent[t]
@@ -172,3 +173,16 @@ if __name__=='__main__':
                     assert error<5e-5,(packed,streamed,chunk,error)
                     assert np.array_equal(actual.argmax(axis=-1),expected.argmax(axis=-1))
                     print(f'Muse complete graph packed={packed} streamed={streamed} chunk={chunk}: max error {error:.3g}',flush=True)
+
+        # Matrix policy is tested separately: changing prefill/cache grouping
+        # may change FP32 summation order, but never the existing FP64 bound.
+        weights=checkpoint(model,packed=True)
+        expected=reference(weights,1+np.arange(40)%30)
+        for streamed in (0,1,2,3):
+            for chunk in (1,3,32,40):
+                subprocess.run([sys.argv[1],str(model),str(output),str(streamed),str(chunk),'1','1'],check=True)
+                actual=np.fromfile(output,dtype='<f4').reshape(40,32)
+                error=np.max(np.abs(actual-expected))
+                assert np.isfinite(actual).all() and error<5e-5,(streamed,chunk,error)
+                assert np.array_equal(actual.argmax(axis=-1),expected.argmax(axis=-1))
+                print(f'Muse FP32 matrix graph streamed={streamed} chunk={chunk}: FP64 max error {error:.3g}',flush=True)

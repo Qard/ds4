@@ -17379,7 +17379,7 @@ static int ds4_gpu_stream_expert_cache_prepare_selected_batch(
         uint32_t      *unique_out,
         id<MTLBuffer> *overflow_gate,
         id<MTLBuffer> *overflow_up,
-        id<MTLBuffer> *overflow_down) {
+        id<MTLBuffer> *overflow_down, bool *routes_unique_out) {
     if (overflow_gate) *overflow_gate = nil;
     if (overflow_up) *overflow_up = nil;
     if (overflow_down) *overflow_down = nil;
@@ -17427,6 +17427,7 @@ static int ds4_gpu_stream_expert_cache_prepare_selected_batch(
     uint32_t unique_count = 0;
     *n_resources = 0;
     *unique_out = 0;
+    if (routes_unique_out) *routes_unique_out=true;
     if (ok) {
         if (!ds4_gpu_stream_expert_cache_ensure_addr_buffers(layer)) {
             ok = 0;
@@ -17450,6 +17451,17 @@ static int ds4_gpu_stream_expert_cache_prepare_selected_batch(
                 unique_ids[unique_count++] = selected_id;
             }
         }
+    }
+    if (ok && routes_unique_out) {
+        /* The shared matrix map encodes one selected slot per token/expert.
+         * Frequency alone cannot detect duplicate slots within a token. */
+        for (uint32_t t=0;t<n_tokens && *routes_unique_out;t++)
+            for (uint32_t s=1;s<n_selected && *routes_unique_out;s++)
+                for (uint32_t previous=0;previous<s;previous++)
+                    if (ids[(uint64_t)t*n_selected+s]==ids[(uint64_t)t*n_selected+previous]) {
+                        *routes_unique_out=false;
+                        break;
+                    }
     }
     if (ok) {
         ds4_gpu_stream_expert_cache_note_frequency_hotness(layer,
@@ -39720,7 +39732,7 @@ static int ds4_gpu_glm_routed_moe_batch_tensor_impl(
                         &stream_unique,
                         &stream_overflow_gate,
                         &stream_overflow_up,
-                        &stream_overflow_down)) {
+                        &stream_overflow_down, NULL)) {
                 return 0;
             }
             if (stream_unique == 0) {
@@ -43754,7 +43766,7 @@ int ds4_gpu_routed_moe_batch_tensor(
                         &stream_unique,
                         &stream_overflow_gate,
                         &stream_overflow_up,
-                        &stream_overflow_down)) {
+                        &stream_overflow_down, NULL)) {
                 g_stream_prefill_batch_selected_addr_building--;
                 return 0;
             }
@@ -50641,7 +50653,7 @@ static int muse_q8_f32_rows(const muse_bind *b,uint32_t in_dim,uint32_t out_dim,
 
 int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t size,
     uint64_t offset, uint32_t type, uint32_t in_dim, uint32_t out_dim,
-    const ds4_gpu_tensor *x, uint32_t tokens) {
+    const ds4_gpu_tensor *x, uint32_t tokens, bool matmul_prefill) {
     if (!in_dim || (in_dim % 4) || !out_dim || !tokens) return 0;
     uint64_t row_bytes = type == 0 ? 4ull * in_dim :
         (type == 1 || type == 30) ? 2ull * in_dim :
@@ -50653,6 +50665,23 @@ int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t si
     if (!muse_weight_bind(&b[0], map, size, offset, row_bytes * out_dim) ||
         !muse_tensor(&b[1], x, (uint64_t)tokens * in_dim * 4) ||
         !muse_tensor(&b[2], out, (uint64_t)tokens * out_dim * 4)) return 0;
+    if(tokens>=32 && in_dim%32==0 && (type==8 || type==14) &&
+       matmul_prefill && ds4_gpu_device_is_m5_apple_silicon()) {
+        const char *name=type==8?"kernel_muse_mm_q8_full_f32":"kernel_muse_mm_q6_full_f32";
+        id<MTLComputePipelineState> pipeline=ds4_gpu_get_mul_mm_pipeline(name,false,
+            tokens%32!=0 || out_dim%64!=0);
+        if(!pipeline) return 0;
+        ds4_gpu_mul_mm_args args=ds4_gpu_make_mm_args(in_dim,out_dim,tokens,row_bytes);
+        int owned=0;id<MTLCommandBuffer> cb=ds4_gpu_command_buffer(&owned);if(!cb)return 0;
+        id<MTLComputeCommandEncoder> enc=ds4_gpu_compute_encoder(cb);if(!enc)return 0;
+        [enc setComputePipelineState:pipeline];[enc setBytes:&args length:sizeof(args) atIndex:0];
+        for(unsigned i=0;i<3;i++)[enc setBuffer:b[i].buf offset:b[i].off atIndex:i+1];
+        [enc setThreadgroupMemoryLength:12288 atIndex:0];
+        [enc dispatchThreadgroups:MTLSizeMake((tokens+31)/32,(out_dim+63)/64,1)
+            threadsPerThreadgroup:MTLSizeMake(128,1,1)];
+        ds4_gpu_end_compute_encoder(cb,enc);
+        return ds4_gpu_finish_command_buffer(cb,owned,"Muse FP32 matrix prefill");
+    }
     if(type==8 && in_dim%128==0) {
         return muse_q8_f32_rows(b,in_dim,out_dim,tokens,row_bytes);
     }
@@ -50675,7 +50704,7 @@ int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t si
 int ds4_gpu_muse_linears_tensor(ds4_gpu_tensor *const *out,
     const void *map,uint64_t size,const uint64_t *offsets,const uint32_t *types,
     const uint32_t *widths,uint32_t count,uint32_t in_dim,
-    const ds4_gpu_tensor *x,uint32_t tokens) {
+    const ds4_gpu_tensor *x,uint32_t tokens, bool matmul_prefill) {
     if(!map||!size||!out||!offsets||!types||!widths||!count||count>4||
        !in_dim||!tokens||(uint64_t)tokens>UINT64_MAX/4/in_dim||
        g_batch_encoder_concurrent) return 0;
@@ -50707,7 +50736,7 @@ int ds4_gpu_muse_linears_tensor(ds4_gpu_tensor *const *out,
     }
     int ok=1;
     for(uint32_t i=0;ok&&i<count;i++) ok=ds4_gpu_muse_linear_tensor(out[i],map,size,
-        offsets[i],types[i],in_dim,widths[i],x,tokens);
+        offsets[i],types[i],in_dim,widths[i],x,tokens, matmul_prefill);
     if(parallel) {ds4_gpu_close_batch_encoder();g_batch_encoder_concurrent=NO;}
     return ok;
 }
@@ -51014,7 +51043,7 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
     uint32_t tokens, uint32_t total, uint32_t slots, uint32_t latent,
     uint32_t ff, uint32_t layer,ds4_gpu_tensor *lists,ds4_gpu_tensor *counts,
-    uint64_t routing_event) {
+    uint64_t routing_event, bool matmul_prefill) {
     if (!tokens || tokens > 1048576 || !total || total > 384 || !slots ||
         slots > DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED || slots > total ||
         !latent || latent > 8192 || !ff || ff > 16384 || layer >= 80) return 0;
@@ -51048,6 +51077,7 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
      * buffers, including when a user requests a very small cache. No mapped
      * expert-bank overflow is permitted on this path. */
     uint32_t row_cap = MAX(1u,budget/slots);
+    if(matmul_prefill && ds4_gpu_device_is_m5_apple_silicon() && budget>=total) row_cap=tokens;
     for (uint32_t first=0; first<tokens;) {
         uint32_t rows = MIN(tokens-first,row_cap);
         ds4_gpu_tensor *views[4] = {
@@ -51078,11 +51108,12 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
         id<MTLBuffer> ga=nil, ua=nil, da=nil, og=nil, ou=nil, od=nil;
         ds4_gpu_stream_expert_cache_entry *resources[DS4_METAL_STREAM_EXPERT_CACHE_MAX_EXPERT];
         uint32_t resource_count=0, unique=0;
+        bool routes_unique=true;
         if (ok) {
             g_stream_prefill_batch_selected_addr_building++;
             ok = ds4_gpu_stream_expert_cache_prepare_selected_batch(map,size,layer,views[1],rows,
                 total,slots,gate_offset,up_offset,down_offset,gate_bytes,down_bytes,
-                &ga,&ua,&da,resources,&resource_count,&unique,&og,&ou,&od);
+                &ga,&ua,&da,resources,&resource_count,&unique,&og,&ou,&od,matmul_prefill && rows>=32 ? &routes_unique : NULL);
             g_stream_prefill_batch_selected_addr_building--;
         }
         if (ok) ok = !og && !ou && !od && unique && unique == resource_count;
@@ -51097,7 +51128,28 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
             if(ok) ok=muse_tensor(&down[3],views[3],(uint64_t)rows*slots*latent*4);
             bool grouped=rows>1&&total<=512&&rows<=INT32_MAX/slots&&
                 gate_type==16&&down_type==16&&!getenv("DS4_METAL_MUSE_EXPERT_BATCH_REFERENCE");
-            if(ok&&grouped) {
+            /* Top-k routes have one selected slot per token/expert. Private
+             * GPU callers can supply duplicates; keep their original grouped
+             * semantics instead of passing ambiguous slots to the matrix map. */
+            const char *map_name=ds4_gpu_mul_mm_id_map0_name(slots);
+            if(ok&&grouped&&rows>=32&&latent==ff&&matmul_prefill&&
+               routes_unique&&(uint64_t)rows*slots*ff<=UINT32_MAX&&map_name&&
+               ds4_gpu_device_is_m5_apple_silicon()) {
+                int owned=0;id<MTLCommandBuffer> cb=ds4_gpu_command_buffer(&owned);
+                id<MTLComputePipelineState> mp=ds4_gpu_get_pipeline(map_name);
+                id<MTLComputePipelineState> mm=ds4_gpu_get_mul_mm_id_pipeline("kernel_muse_iq2_cached_simd_f32",false);
+                ds4_gpu_mul_mm_id_map_args ma=ds4_gpu_make_mul_mm_id_map_args(latent,total,1,slots,rows);
+                ds4_gpu_mul_mm_id_args ga=ds4_gpu_make_mul_mm_id_args(latent,ff,total,gate_row,gate_bytes,1,slots,rows),
+                    da=ds4_gpu_make_mul_mm_id_args(ff,latent,total,down_row,down_bytes,slots,slots,rows);
+                ga.tp_world=da.tp_world=1;
+                ok=cb&&mp&&mm&&ds4_gpu_encode_mul_mm_id_map(cb,mp,&ma,&ga,b[2].buf,b[2].off)&&
+                    ds4_gpu_stream_expert_cache_mark_entries_inflight(resources,resource_count,0)&&
+                    ds4_gpu_encode_mul_mm_id_mapped_tile_resources(cb,mm,&ga,b[0].buf,0,b[3].buf,b[3].off,b[4].buf,b[4].off,12288,resources,resource_count,0,nil,64)&&
+                    ds4_gpu_encode_mul_mm_id_mapped_tile_resources(cb,mm,&ga,b[1].buf,0,b[3].buf,b[3].off,down[3].buf,down[3].off,12288,resources,resource_count,1,nil,64)&&
+                    ds4_gpu_encode_swiglu_flat(cb,b[4].buf,b[4].off,down[3].buf,down[3].off,b[4].buf,b[4].off,rows*slots*ff)&&
+                    ds4_gpu_encode_mul_mm_id_mapped_tile_resources(cb,mm,&da,down[0].buf,0,down[2].buf,down[2].off,down[3].buf,down[3].off,12288,resources,resource_count,2,nil,64);
+                if(ok) ok=ds4_gpu_finish_command_buffer(cb,owned,"Muse FP32 expert matrix prefill");
+            } else if(ok&&grouped) {
                 /* Reuse the existing per-expert pair lists. Each RHS keeps
                  * its original slot, so list ordering does not change math. */
                 uint32_t cap=rows*slots,denom=resource_count*4;

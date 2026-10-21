@@ -2511,7 +2511,7 @@ template [[host_name("kernel_mul_mm_q8_0_f32_nax_direct_rhs_n128")]] kernel mul_
 // Tiled matrix-matrix kernel used for prompt batches larger than 8. DS4 uses
 // this to turn prefill into large simdgroup matrix operations; each block_q
 // contains 16*nl weights.
-template<typename S0, typename S0_4x4, typename S0_8x8, typename S1, typename S1_2x4, typename S1_8x8, typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread S0_4x4 &), typename T0, typename T0_4x4, typename T1, typename T1_2x4>
+template<typename S0, typename S0_4x4, typename S0_8x8, typename S1, typename S1_2x4, typename S1_8x8, typename block_q, short nl, void (*dequantize_func)(device const block_q *, short, thread S0_4x4 &), typename T0, typename T0_4x4, typename T1, typename T1_2x4, short ACC_K = 0>
 kernel void kernel_mul_mm(
         constant ds4_metal_args_mul_mm & args,
         device const char * src0,
@@ -2568,9 +2568,12 @@ kernel void kernel_mul_mm(
     S1_8x8 mb[2];
 
     simdgroup_float8x8 mc[8];
+    simdgroup_float8x8 partial[8];
 
     for (short i = 0; i < 8; i++){
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
+        if constexpr (ACC_K > 0)
+            partial[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
     }
 
     for (int loop_k = 0; loop_k < args.ne00; loop_k += NK) {
@@ -2661,11 +2664,31 @@ kernel void kernel_mul_mm(
             simdgroup_barrier(mem_flags::mem_none);
 
             FOR_UNROLL (short i = 0; i < 8; i++){
-                simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
+                if constexpr (ACC_K > 0)
+                    simdgroup_multiply_accumulate(partial[i], mb[i/4], ma[i%4], partial[i]);
+                else
+                    simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
             }
 
             lsma += 8*64;
             lsmb += 4*64;
+        }
+        if constexpr (ACC_K > 0) {
+            /* Bound FP32 accumulation depth for wide full-FP32 products.
+             * Reuse the tile after its final consumer; an identity product
+             * adds the partial matrix without another global output bank. */
+            if ((loop_k+NK)%ACC_K==0 || loop_k+NK>=args.ne00) {
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                threadgroup float *identity_data=(threadgroup float *)shmem;
+                if (tiitg<64) identity_data[tiitg]=tiitg%9==0 ? 1.f : 0.f;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                simdgroup_float8x8 identity;
+                simdgroup_load(identity,identity_data,8,0,false);
+                FOR_UNROLL (short i=0;i<8;i++) {
+                    simdgroup_multiply_accumulate(mc[i],identity,partial[i],mc[i]);
+                    partial[i]=make_filled_simdgroup_matrix<float,8>(0.f);
+                }
+            }
         }
     }
 

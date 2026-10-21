@@ -43,41 +43,41 @@ int main(void) {
         for(unsigned shape=0;shape<sizeof(rows)/sizeof(*rows);shape++) {
             unsigned t=rows[shape];
             assert(ds4_gpu_begin_commands());
-            for(unsigned i=0;i<4;i++) assert(ds4_gpu_muse_linear_tensor(out[i],map,SIZE,offsets[i],types[i],D,widths[i],x,t));
+            for(unsigned i=0;i<4;i++) assert(ds4_gpu_muse_linear_tensor(out[i],map,SIZE,offsets[i],types[i],D,widths[i],x,t, false));
             assert(ds4_gpu_muse_logits_tensor(out[0],t*widths[0],.5f,20.f)&&ds4_gpu_end_commands());
             for(unsigned i=0;i<4;i++) assert(ds4_gpu_tensor_read(out[i],0,gold[i],t*widths[i]*4));
             /* Without a caller-owned batch, use the existing serial owned-CB
              * path and leave no command scope behind. */
-            assert(ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,4,D,x,t));
+            assert(ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,4,D,x,t, false));
             assert(!ds4_gpu_commands_active());
             assert(ds4_gpu_muse_logits_tensor(out[0],t*widths[0],.5f,20.f));
             for(unsigned i=0;i<4;i++) assert(ds4_gpu_tensor_read(out[i],0,actual,t*widths[i]*4)&&!memcmp(actual,gold[i],t*widths[i]*4));
             for(unsigned count=1;count<=4;count++) {
                 assert(ds4_gpu_begin_commands());
-                assert(ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,count,D,x,t));
+                assert(ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,count,D,x,t, false));
                 assert(ds4_gpu_muse_logits_tensor(out[0],t*widths[0],.5f,20.f)&&ds4_gpu_end_commands());
                 for(unsigned i=0;i<count;i++) assert(ds4_gpu_tensor_read(out[i],0,actual,t*widths[i]*4)&&!memcmp(actual,gold[i],t*widths[i]*4));
             }
             for(unsigned repeat=0;repeat<12;repeat++) {
                 assert(ds4_gpu_begin_commands());
-                assert(!ds4_gpu_muse_linears_tensor(NULL,map,SIZE,offsets,types,widths,4,D,x,t));
-                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,NULL,types,widths,4,D,x,t));
-                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,NULL,widths,4,D,x,t));
-                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,NULL,4,D,x,t));
-                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,4,D,x,0));
-                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,4,0,x,t));
-                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,0,D,x,t));
-                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,5,D,x,t));
+                assert(!ds4_gpu_muse_linears_tensor(NULL,map,SIZE,offsets,types,widths,4,D,x,t, false));
+                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,NULL,types,widths,4,D,x,t, false));
+                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,NULL,widths,4,D,x,t, false));
+                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,NULL,4,D,x,t, false));
+                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,4,D,x,0, false));
+                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,4,0,x,t, false));
+                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,0,D,x,t, false));
+                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,5,D,x,t, false));
                 ds4_gpu_tensor *overlap[4]={out[0],out[0],out[2],out[3]};
-                assert(!ds4_gpu_muse_linears_tensor(overlap,map,SIZE,offsets,types,widths,4,D,x,t));
+                assert(!ds4_gpu_muse_linears_tensor(overlap,map,SIZE,offsets,types,widths,4,D,x,t, false));
                 overlap[0]=x;overlap[1]=out[1];
-                assert(!ds4_gpu_muse_linears_tensor(overlap,map,SIZE,offsets,types,widths,4,D,x,t));
+                assert(!ds4_gpu_muse_linears_tensor(overlap,map,SIZE,offsets,types,widths,4,D,x,t, false));
                 /* Failure after earlier dispatches must close any concurrent
                  * section and leave the caller's batch usable for recovery. */
                 uint32_t bad[4]={types[0],types[1],UINT32_MAX,types[3]};
-                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,bad,widths,4,D,x,t));
+                assert(!ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,bad,widths,4,D,x,t, false));
                 assert(ds4_gpu_commands_active());
-                assert(ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,4,D,x,t));
+                assert(ds4_gpu_muse_linears_tensor(out,map,SIZE,offsets,types,widths,4,D,x,t, false));
                 /* A dependent consumer proves the projection scope ended. */
                 assert(ds4_gpu_muse_logits_tensor(out[0],t*widths[0],.5f,20.f)&&ds4_gpu_end_commands());
                 for(unsigned i=0;i<4;i++) assert(ds4_gpu_tensor_read(out[i],0,actual,t*widths[i]*4)&&!memcmp(actual,gold[i],t*widths[i]*4));

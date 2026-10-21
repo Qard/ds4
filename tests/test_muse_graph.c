@@ -6,7 +6,9 @@ static unsigned observed_layers;
 #include <assert.h>
 
 int main(int argc, char **argv) {
-    assert(argc==6);
+    assert(argc==6 || argc==7);
+    bool matrix=argc==7 && atoi(argv[6])!=0;
+    unsigned count=matrix?40:10, context=matrix?64:16;
     bool packed=atoi(argv[5])!=0; unsigned d=packed?256:128;
     g_ds4_shape=DS4_SHAPE_MUSE_SPARK;
     g_ds4_shape.n_layer=2; g_ds4_shape.n_embd=d; g_ds4_shape.n_vocab=32;
@@ -25,17 +27,19 @@ int main(int argc, char **argv) {
     unsigned chunk=atoi(argv[4]);
     ds4_muse_gpu_graph g,last_graph;
     ds4_muse_gpu_graph invalid_graph;
-    assert(!muse_graph_alloc(&invalid_graph,16,chunk,0));
-    assert(!muse_graph_alloc(&invalid_graph,16,chunk,chunk+1));
+    assert(!muse_graph_alloc(&invalid_graph,context,chunk,0));
+    assert(!muse_graph_alloc(&invalid_graph,context,chunk,chunk+1));
     assert(muse_graph_bytes(32,3)-muse_graph_bytes(16,3)==16*(d/2)*4);
-    assert(muse_graph_alloc(&g,16,chunk,chunk));
-    assert(muse_graph_alloc(&last_graph,16,chunk,1));
+    assert(muse_graph_alloc(&g,context,chunk,chunk));
+    assert(muse_graph_alloc(&last_graph,context,chunk,1));
     assert(ds4_gpu_tensor_bytes(g.logits)==(uint64_t)chunk*DS4_N_VOCAB*4);
     assert(ds4_gpu_tensor_bytes(last_graph.logits)==(uint64_t)DS4_N_VOCAB*4);
+    g.matmul_prefill=last_graph.matmul_prefill=matrix;
     FILE *out=fopen(argv[2],"wb"); assert(out);
-    int ids[]={1,2,3,4,5,6,7,8,9,10}; float logits[10*32],first_logits[32];
-    for(unsigned first=0;first<10;) {
-        unsigned n=MIN(chunk,10-first);
+    int ids[count];for(unsigned i=0;i<count;i++)ids[i]=1+i%30;
+    float logits[count*32],first_logits[32];
+    for(unsigned first=0;first<count;) {
+        unsigned n=MIN(chunk,count-first);
         observed_layers=0;
         assert(muse_graph_forward(&g,&m,&w,ids+first,n,logits,true));
         assert(observed_layers==DS4_N_LAYER);
@@ -47,8 +51,11 @@ int main(int argc, char **argv) {
             assert(last_graph.valid && last_graph.pos==position);
         }
         assert(muse_graph_forward(&last_graph,&m,&w,ids+first,n,last,false));
-        /* Every Q8 row now uses the same FP32 reduction in both paths. */
-        assert(memcmp(last,logits+(n-1)*32,sizeof(last))==0);
+        /* Reference matvecs keep strict batch invariance. The optional full-
+         * FP32 matrix profile has an independent FP64 oracle below; its final
+         * one-row output projection can round differently from all-row MMA. */
+        if(matrix) for(unsigned i=0;i<32;i++)assert(fabsf(last[i]-logits[(n-1)*32+i])<5e-5f);
+        else assert(memcmp(last,logits+(n-1)*32,sizeof(last))==0);
         assert(fwrite(logits,32*4,n,out)==n);
         first+=n;
     }
@@ -79,7 +86,7 @@ int main(int argc, char **argv) {
     }
     int invalid=32;
     assert(!muse_graph_forward(&g,&m,&w,&invalid,1,logits,true));
-    assert(g.valid && g.pos==10);
+    assert(g.valid && g.pos==count);
     assert(fclose(out)==0);
     muse_graph_free(&last_graph);
     muse_graph_free(&g); ds4_gpu_cleanup(); model_close(&m);

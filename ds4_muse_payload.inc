@@ -2,8 +2,12 @@
  * Store ring rows in token order, independent of the saving prefill capacity. */
 #define DS4_MUSE_PAYLOAD_TAG 0x4d555301u
 #define DS4_MUSE_FLASH_PAYLOAD_TAG 0x4d555302u
+#define DS4_MUSE_MATRIX_PAYLOAD_TAG 0x4d555303u
+#define DS4_MUSE_MATRIX_FLASH_PAYLOAD_TAG 0x4d555304u
 
 static uint32_t muse_payload_tag(const ds4_muse_gpu_graph *g) {
+    if (g->matmul_prefill)
+        return g->flash_attention ? DS4_MUSE_MATRIX_FLASH_PAYLOAD_TAG : DS4_MUSE_MATRIX_PAYLOAD_TAG;
     return g->flash_attention ? DS4_MUSE_FLASH_PAYLOAD_TAG : DS4_MUSE_PAYLOAD_TAG;
 }
 

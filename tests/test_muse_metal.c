@@ -29,22 +29,22 @@ static int bench_linear(const char *rollback_env,double minimum_speedup,bool dec
     assert(x&&y&&ds4_gpu_tensor_write(x,0,input,(size_t)TMAX*K*4));
     assert(!setenv(rollback_env,"1",1));
     for(unsigned warm=0;warm<3;warm++)
-        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,decode_only?1:TMAX)&&ds4_gpu_synchronize());
+        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,decode_only?1:TMAX, false)&&ds4_gpu_synchronize());
     const unsigned shapes[]={1,3,4,5,8,16,512};int rc=0;
     const unsigned rounds=decode_only?24:6;
     for(unsigned shape=0;shape<sizeof(shapes)/sizeof(shapes[0]);shape++) {
         unsigned rows=shapes[shape],reps=decode_only?32:rows==512?1:8;double elapsed[2]={0};
         if(decode_only&&rows!=1) continue;
         assert(!setenv(rollback_env,"1",1));
-        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows));
+        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows, false));
         assert(ds4_gpu_tensor_read(y,0,reference,(size_t)rows*N*4));
         for(unsigned round=0;round<rounds;round++) for(unsigned order=0;order<2;order++) {
             unsigned variant=(round+order)&1;
             assert(!(variant?unsetenv(rollback_env):setenv(rollback_env,"1",1)));
             /* Warm pipeline specialization before the timed batch. */
-            assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows)&&ds4_gpu_synchronize());
+            assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows, false)&&ds4_gpu_synchronize());
             double start=bench_seconds();assert(ds4_gpu_begin_commands());
-            for(unsigned rep=0;rep<reps;rep++) assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows));
+            for(unsigned rep=0;rep<reps;rep++) assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,rows, false));
             assert(ds4_gpu_end_commands());elapsed[variant]+=bench_seconds()-start;
             assert(ds4_gpu_tensor_read(y,0,actual,(size_t)rows*N*4));
             if(memcmp(reference,actual,(size_t)rows*N*4)) {fprintf(stderr,"Q6_K linear drift rows=%u variant=%u\n",rows,variant);rc=1;goto done;}
@@ -102,6 +102,49 @@ done:
     munmap(weights,WIDTH*4);free(input);free(reference);free(actual);return rc;
 }
 
+/* Wide packed Q6 products use an independent FP64 dot, with the original
+ * 1e-4 bound and guarded nonzero-offset views at a partial matrix tile. */
+static void test_wide_q6(void) {
+    enum {K=8192,N=19,T=65,PAD=16,STRIDE=K/256*210};
+    const size_t bytes=N*STRIDE;
+    unsigned char *map=mmap(NULL,bytes,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
+    assert(map!=MAP_FAILED);
+    float *decoded=calloc(N*K,4),*input=malloc(T*K*4),*actual=malloc((T*N+2*PAD)*4);
+    assert(decoded&&input&&actual);
+    for(unsigned r=0;r<N;r++)for(unsigned c=0;c<K;c++) {
+        unsigned char *p=map+r*STRIDE+(c/256)*210;
+        unsigned j=c%256,half=j/128,q=j%128/32,l=j%32;
+        unsigned low=half*64+(q&1)*32+l,high=128+half*32+l;
+        unsigned code=(c*17+r*11)%64;int scale=(int)((c/16+r)%13)-6;
+        p[low]|=(code&15)<<((q/2)*4);p[high]|=(code>>4)<<(q*2);
+        ((int8_t *)(p+192))[j/16]=scale;
+        uint16_t d=0x3000;memcpy(p+208,&d,2);
+        decoded[r*K+c]=.125f*scale*((int)code-32);
+    }
+    for(unsigned i=0;i<T*K;i++)input[i]=sinf(i*.17f)*.135f+cosf(i*.07f)*.031f;
+    assert(ds4_gpu_init()&&ds4_gpu_set_model_map(map,bytes));
+    ds4_gpu_tensor *xb=ds4_gpu_tensor_alloc((T*K+2*PAD)*4),*yb=ds4_gpu_tensor_alloc((T*N+2*PAD)*4);
+    ds4_gpu_tensor *x=ds4_gpu_tensor_view(xb,PAD*4,T*K*4),*y=ds4_gpu_tensor_view(yb,PAD*4,T*N*4);
+    assert(x&&y&&ds4_gpu_tensor_write(x,0,input,T*K*4));
+    for(unsigned policy=0;policy<2;policy++) {
+        for(unsigned i=0;i<T*N+2*PAD;i++)actual[i]=123456.f;
+        assert(ds4_gpu_tensor_write(yb,0,actual,(T*N+2*PAD)*4));
+        assert(ds4_gpu_muse_linear_tensor(y,map,bytes,0,14,K,N,x,T,policy!=0));
+        assert(ds4_gpu_tensor_read(yb,0,actual,(T*N+2*PAD)*4));
+        for(unsigned i=0;i<PAD;i++)assert(actual[i]==123456.f&&actual[PAD+T*N+i]==123456.f);
+        double worst=0;
+        for(unsigned t=0;t<T;t++)for(unsigned r=0;r<N;r++) {
+            double expected=0;for(unsigned c=0;c<K;c++)expected+=(double)decoded[r*K+c]*input[t*K+c];
+            double error=fabs(actual[PAD+t*N+r]-expected);if(error>worst)worst=error;
+            if(!(error<1e-4))fprintf(stderr,"Wide Q6 mismatch matrix=%u t=%u row=%u actual=%.9g expected=%.12g error=%.12g\n",policy,t,r,actual[PAD+t*N+r],expected,error);
+            assert(error<1e-4);
+        }
+        printf("Muse wide Q6 policy=%u FP64 max error %.9g guards PASS\n",policy,worst);
+    }
+    ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(y);ds4_gpu_tensor_free(xb);ds4_gpu_tensor_free(yb);
+    ds4_gpu_cleanup();munmap(map,bytes);free(decoded);free(input);free(actual);
+}
+
 int main(int argc,char **argv) {
     if(argc>1&&!strcmp(argv[1],"--bench-norm")) {
         char *end=NULL;double minimum=argc==3?strtod(argv[2],&end):0;
@@ -122,7 +165,7 @@ int main(int argc,char **argv) {
     unsigned char *matrix = mmap(NULL, map_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
     assert(matrix != MAP_FAILED && ds4_gpu_set_model_map(matrix, map_size));
     const unsigned types[] = {0, 8, 30, 14};
-    const unsigned K = 256, N = 17, T = 7;
+    const unsigned K = 256, N = 17, T = 33;
     ds4_gpu_tensor *x = ds4_gpu_tensor_alloc(T * K * sizeof(float));
     ds4_gpu_tensor *y = ds4_gpu_tensor_alloc((T + 1) * N * sizeof(float));
     float inputs[T * K], actual[T * N];
@@ -162,8 +205,9 @@ int main(int argc,char **argv) {
                 }
             }
         }
+        for(unsigned matrix_policy=0;matrix_policy<2;matrix_policy++) {
         assert(ds4_gpu_tensor_write(y,(uint64_t)T*N*4,guard,sizeof(guard)));
-        assert(ds4_gpu_muse_linear_tensor(y, matrix, map_size, 0, type, K, N, x, T));
+        assert(ds4_gpu_muse_linear_tensor(y, matrix, map_size, 0, type, K, N, x, T, matrix_policy!=0));
         assert(ds4_gpu_synchronize());
         assert(ds4_gpu_tensor_read(y, 0, actual, sizeof(actual)));
         assert(ds4_gpu_tensor_read(y,(uint64_t)T*N*4,guard_actual,sizeof(guard_actual)));
@@ -172,6 +216,7 @@ int main(int argc,char **argv) {
             float expected = 0;
             for (unsigned i = 0; i < K; i++) expected += decoded[r * K + i] * inputs[t * K + i];
             assert(fabsf(expected - actual[t * N + r]) < 1e-4f);
+        }
         }
     }
     /* Q6 row pairs must preserve every original bit, including an odd final
@@ -182,11 +227,11 @@ int main(int argc,char **argv) {
     for(unsigned shape=0;shape<sizeof(q6_rows)/sizeof(*q6_rows);shape++) {
         unsigned rows=q6_rows[shape];float reference[T*N];
         assert(!setenv("DS4_METAL_MUSE_Q6_ROWS_REFERENCE","1",1));
-        assert(ds4_gpu_muse_linear_tensor(y,matrix,map_size,0,14,K,N,x,rows));
+        assert(ds4_gpu_muse_linear_tensor(y,matrix,map_size,0,14,K,N,x,rows, false));
         assert(ds4_gpu_tensor_read(y,0,reference,rows*N*4));
         assert(ds4_gpu_tensor_write(y,(uint64_t)rows*N*4,guard,sizeof(guard)));
         assert(!unsetenv("DS4_METAL_MUSE_Q6_ROWS_REFERENCE"));
-        assert(ds4_gpu_muse_linear_tensor(y,matrix,map_size,0,14,K,N,x,rows));
+        assert(ds4_gpu_muse_linear_tensor(y,matrix,map_size,0,14,K,N,x,rows, false));
         assert(ds4_gpu_tensor_read(y,0,actual,rows*N*4)&&!memcmp(reference,actual,rows*N*4));
         assert(ds4_gpu_tensor_read(y,(uint64_t)rows*N*4,guard_actual,sizeof(guard_actual))&&!memcmp(guard,guard_actual,sizeof(guard)));
         for(unsigned t=0;t<rows;t++) for(unsigned r=0;r<N;r++) {
@@ -263,6 +308,7 @@ int main(int argc,char **argv) {
     ds4_gpu_tensor_free(x);
     ds4_gpu_cleanup();
     munmap(matrix, map_size);
+    test_wide_q6();
     puts("Muse native Metal kernels: PASS");
     return 0;
 }

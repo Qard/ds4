@@ -532,3 +532,9 @@ kernel void kernel_muse_flash_pad_tail(constant muse_flash_pad_args &a,
     }
     pad[to] = x; pad[bank+to] = y;
 }
+
+/* Reuse the shared full-FP32 matrix implementation with native packed
+ * weights. This policy never converts activations or dequantized tiles to F16. */
+template [[host_name("kernel_muse_mm_q8_full_f32")]] kernel mul_mm_t kernel_mul_mm<float, float4x4, simdgroup_float8x8, float, float2x4, simdgroup_float8x8, block_q8_0, 2, dequantize_q8_0, float, float4x4, float, float2x4, 512>;
+template [[host_name("kernel_muse_mm_q6_full_f32")]] kernel mul_mm_t kernel_mul_mm<float, float4x4, simdgroup_float8x8, float, float2x4, simdgroup_float8x8, block_q6_K, 16, dequantize_q6_K, float, float4x4, float, float2x4>;
+template [[host_name("kernel_muse_iq2_cached_simd_f32")]] kernel mul_mm_id kernel_mul_mm_id<32,float,float4x4,simdgroup_float8x8,float,float2x4,simdgroup_float8x8,block_iq2_xxs,16,dequantize_iq2_xxs,float,float4x4,float,float2x4,false,true>;
