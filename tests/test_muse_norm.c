@@ -60,6 +60,8 @@ int main(void) {
     for(unsigned i=0;i<sizeof(widths)/sizeof(*widths);i++)
         for(unsigned rows=1;rows<=3;rows+=2)
             for(unsigned pattern=0;pattern<4;pattern++) check_norm(map,SIZE,widths[i],rows,pattern);
+    check_norm(map,SIZE,4096,512,0); /* Parallel-row fallback. */
+    check_norm(map,SIZE,8192,512,0); /* Wide batched staging. */
     ds4_gpu_cleanup();munmap(map,SIZE);
     puts("Muse normalization exact reference, FP64, zero/subnormal, in-place and offset guards: PASS");
     return 0;

@@ -50724,8 +50724,10 @@ int ds4_gpu_muse_input_norm_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,
         !muse_tensor(&b[2], out, (uint64_t)rows * width * 4)) return 0;
     /* A single SIMD group retains the original reduction; additional threads
      * only stage inputs and store outputs. Restrict this measured policy to
-     * M5 and the wide vectors that amortize its two threadgroup barriers. */
+     * M5 and wide vectors. Narrower 4K vectors retain the original path
+     * for large batches, where their independent rows already hide latency. */
     if (!getenv("DS4_METAL_MUSE_NORM_REFERENCE") && width>=4096 && width<=8192 &&
+        (rows<=32 || width==8192) &&
         ds4_gpu_device_is_m5_apple_silicon() &&
         (uint64_t)width*4<=g_device.maxThreadgroupMemoryLength) {
         @autoreleasepool {

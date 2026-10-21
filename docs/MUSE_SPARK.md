@@ -1158,8 +1158,9 @@ sliding cases.
 Wide gain-before-RMS normalization now stages weighted inputs and spreads
 final stores across a threadgroup on M5. One SIMD group retains the original
 per-lane serial FMA chain and SIMD reduction. The measured policy applies only
-to widths 4096 through 8192, uses 1024 threads (512 if that is the pipeline
-limit), and checks shared-memory capacity before dispatch. Other shapes and
+to widths 4096 through 8192 with at most 32 rows, plus 8192-wide larger
+batches. It uses 1024 threads (512 if that is the pipeline limit) and checks
+shared-memory capacity before dispatch. Other shapes and
 devices retain the existing path. `DS4_METAL_MUSE_NORM_REFERENCE=1` selects the
 original scalar reference. No math-profile or checkpoint-tag change is needed.
 
@@ -1183,3 +1184,10 @@ Further strict FP32 matrix experiments retained the numerical bounds but
 failed to improve single-token decoding. Supported partial eight-column tiles
 were slower, and decoding weights into cooperative input fragments was much
 slower. Their layouts and kernels are not runtime policies.
+
+Large-batch component checks retain the original kernel for narrower 4K-wide
+prefill batches: staging 512 independent rows was about 30% slower in two
+rotated measurements. The 8192-wide case improved at 512, 4096 and 8192 rows,
+so it retains staging. The decode policy (one main row and eight expert rows)
+and its full-model measurements above are unchanged. Large-batch reference,
+in-place and FP64 checks are included in `test-muse-norm`.
