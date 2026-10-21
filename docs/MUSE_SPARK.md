@@ -655,7 +655,7 @@ in Automatic power mode. Hardware state varied between sweeps; these numbers
 are observations, not a controlled 13% attribution to normalization. The
 balanced comparison above isolates its smaller gain. A host compilation ran
 during the last prefill interval and finished before the final decode probe.
-The latest sustained observation is 4.89 tokens/s; the 10 tokens/s target is
+The latest standalone fixed-cache observation is 4.89 tokens/s; the 10 tokens/s target is
 still unmet.
 
 Decode now uses the existing Metal routing event to submit the independent
@@ -763,3 +763,48 @@ outside timed evaluation and selection. It allows prefix-copy hit rates to be
 measured before adding stateful lookahead. It does not change sampling or model
 execution. Saved prefixes remain usable through `--load-prefix` for subsequent
 native decode experiments.
+
+
+The updated kernels also completed an 8192-token prefill followed by 32 warmup
+and 256 measured decode tokens per variant. With context allocation 8481 and a
+shared auto-admitted 58.09 GiB expert cache, current Q6 measured 4.33 versus
+4.30 tokens/s for its prior layout. All 58,391,872 logits and 288 selected IDs
+matched bit-for-bit. Runtime was 821.68 seconds, peak RSS 78.88 GiB, and the
+system swapout counter did not increase. The saved native prefix payload is
+1,020,056,884 bytes; all 202,048 saved frontier logits exactly match the earlier
+8192-token reference. A subsequent disk restore preserved the complete 288-token
+trajectory. These paired-session observations use a different cache and warmup
+protocol from the standalone CSV above.
+
+Loading that saved state and repeating 256 measured tokens without profiling
+measured 8.40 and 8.46 tokens/s for two identical decode paths. A longer run of
+1024 measured tokens per path averaged 5.51 tokens/s, with all 213,564,736 logits
+and 1,056 selected IDs exact. It loaded the same 8192-token state into a
+9249-token allocation; its first 288 evaluated IDs exactly matched the shorter
+run. Peak RSS was 79.99 GiB and the system swapout counter again did not
+increase. Approximate successive window rates declined from 8 to 7 to 5 tokens/s.
+The short 8.4 result therefore does not establish sustained 10 tokens/s.
+
+Telemetry shows different GPU conditions: active samples after long prefill
+averaged about 473 MHz and 6.88 W, versus 1318 MHz and 31.96 W across the shorter
+restored run. Decode boundaries for the former are approximated by the saved
+prefix file's completion time. These observations are correlated with speed;
+they do not establish why clocks changed. The Mac remained in Automatic power
+mode, with no power, fan, or sleep settings changed.
+
+A fresh restored-state profile attributes about 27.1% of GPU time to Q6,
+26.0% to Q8, 17.0% to expert gate/up, 9.0% to expert down, 10.0% to split
+attention, and 4.1% to input normalization. Public Metal counter enumeration on
+this device exposes timestamps only. The instrumented run is diagnostic, not a
+throughput target measurement.
+
+Causal prefix-copy analysis of the 288 actual evaluated inputs found no
+8-token suffix opportunities. A looser 3-token match saved at most four model
+forwards while adding 38 extra input rows. This trace does not justify a
+stateful lookahead path. A bounded four-output-row Q8 weight-layout experiment
+preserved every output bit, but gained only about 4% on the largest decode
+matrix while regressing smaller shapes by about 9–11%; no production weight
+repacking is introduced. Disabling existing advisory expert readahead measured
+8.03 versus 8.05 tokens/s, with all 58,391,872 logits exact, so its default is
+unchanged. A diagnostic user-initiated process activity did not prevent the
+long-run slowdown (about 5.2 tokens/s); no activity policy is added to inference.

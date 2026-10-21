@@ -159,7 +159,7 @@ if __name__=='__main__':
         for packed in (False,True):
             expected=reference(checkpoint(model,packed=packed))
             baseline={}
-            for streamed in (0,1,2):
+            for streamed in (0,1,2,3):
                 for chunk in (1,3,10):
                     subprocess.run([sys.argv[1],str(model),str(output),str(streamed),str(chunk),str(int(packed))],check=True)
                     actual=np.fromfile(output,dtype='<f4').reshape(10,32)
