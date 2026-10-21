@@ -7,6 +7,14 @@
 int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t size,
     uint64_t offset, uint32_t type, uint32_t in_dim, uint32_t out_dim,
     const ds4_gpu_tensor *x, uint32_t tokens);
+/* One to four independent projections share an input. Output ranges must be
+ * disjoint from the input and each other; nonoverlapping buffer views are OK.
+ * Any concurrent section it starts ends before returning, including on failure.
+ * The caller retains ownership of an active command batch. */
+int ds4_gpu_muse_linears_tensor(ds4_gpu_tensor *const *out,
+    const void *map, uint64_t size, const uint64_t *offsets, const uint32_t *types,
+    const uint32_t *widths, uint32_t count, uint32_t in_dim,
+    const ds4_gpu_tensor *x, uint32_t tokens);
 int ds4_gpu_muse_input_norm_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,
     const void *map, uint64_t size, uint64_t weight_offset,
     uint32_t rows, uint32_t width, float eps);

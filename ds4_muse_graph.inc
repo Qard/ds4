@@ -95,6 +95,19 @@ static bool muse_norm(ds4_gpu_tensor *out,const ds4_gpu_tensor *x,const ds4_mode
                                                width,rows,DS4_RMS_EPS);
 }
 
+static bool muse_attention_projections(ds4_muse_gpu_graph *g,const ds4_model *m,
+        const ds4_layer_weights *l,uint32_t tokens) {
+    ds4_gpu_tensor *outputs[4]={g->q,g->k,g->v,g->gate};
+    const ds4_tensor *weights[4]={l->attn_q,l->attn_k,l->attn_v,l->attn_gate};
+    uint64_t offsets[4];uint32_t types[4],widths[4];
+    for(unsigned i=0;i<4;i++) {
+        offsets[i]=weights[i]->abs_offset;types[i]=weights[i]->type;
+        widths[i]=weights[i]->dim[1];
+    }
+    return ds4_gpu_muse_linears_tensor(outputs,m->map,m->size,offsets,types,
+        widths,4,DS4_N_EMBD,g->xn,tokens);
+}
+
 static bool muse_latent_with_prefetch(ds4_muse_gpu_graph *g,const ds4_model *m,
         const ds4_layer_weights *l,uint32_t layer,uint32_t tokens) {
     uint64_t event=0;
@@ -127,8 +140,7 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
         }
         const ds4_layer_weights *l=&w->layer[il];
         ok=muse_norm(g->xn,g->r,m,l->attn_norm,T,DS4_N_EMBD) &&
-            muse_gemv(g->q,m,l->attn_q,g->xn,T) && muse_gemv(g->k,m,l->attn_k,g->xn,T) &&
-            muse_gemv(g->v,m,l->attn_v,g->xn,T) && muse_gemv(g->gate,m,l->attn_gate,g->xn,T) &&
+            muse_attention_projections(g,m,l,T) &&
             muse_norm(g->q,g->q,m,l->attn_q_norm,T*DS4_N_HEAD,DS4_N_HEAD_DIM) &&
             muse_norm(g->k,g->k,m,l->attn_k_norm,T*DS4_N_HEAD_KV,DS4_N_HEAD_DIM) &&
             ds4_gpu_muse_kv_store_tensor(g->q,g->kc[il],g->vc[il],g->k,g->v,T,

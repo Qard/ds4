@@ -50662,6 +50662,46 @@ int ds4_gpu_muse_linear_tensor(ds4_gpu_tensor *out, const void *map, uint64_t si
     return muse_dispatch(kernel, &a, sizeof(a), b, 3, MTLSizeMake(out_dim, tokens, 1));
 }
 
+int ds4_gpu_muse_linears_tensor(ds4_gpu_tensor *const *out,
+    const void *map,uint64_t size,const uint64_t *offsets,const uint32_t *types,
+    const uint32_t *widths,uint32_t count,uint32_t in_dim,
+    const ds4_gpu_tensor *x,uint32_t tokens) {
+    if(!map||!size||!out||!offsets||!types||!widths||!count||count>4||
+       !in_dim||!tokens||(uint64_t)tokens>UINT64_MAX/4/in_dim||
+       g_batch_encoder_concurrent) return 0;
+    muse_bind ranges[5];uint64_t bytes[5]={(uint64_t)tokens*in_dim*4};
+    if(!muse_tensor(&ranges[0],x,bytes[0])) return 0;
+    for(uint32_t i=0;i<count;i++) {
+        if(!widths[i]||(uint64_t)tokens>UINT64_MAX/4/widths[i]) return 0;
+        bytes[i+1]=(uint64_t)tokens*widths[i]*4;
+        if(!muse_tensor(&ranges[i+1],out[i],bytes[i+1])) return 0;
+        for(uint32_t j=0;j<=i;j++) {
+            if(ranges[i+1].buf==ranges[j].buf&&
+               ranges[i+1].off<ranges[j].off+bytes[j]&&
+               ranges[j].off<ranges[i+1].off+bytes[i+1]) return 0;
+        }
+    }
+    /* Use the existing batch encoder and original kernels. A separate pass
+     * bounds the independent work; tracked resources synchronize its serial
+     * producers and consumers. Larger batches retain their existing schedule. */
+    bool parallel=g_batch_cb&&count>1&&tokens<=4&&
+        ds4_gpu_device_is_m5_apple_silicon()&&
+        !getenv("DS4_METAL_MUSE_PROJECTIONS_REFERENCE");
+    if(parallel) {
+        ds4_gpu_close_batch_encoder();g_batch_encoder_concurrent=YES;
+        id<MTLComputeCommandEncoder> enc=ds4_gpu_compute_encoder(g_batch_cb);
+        if(!enc||enc.dispatchType!=MTLDispatchTypeConcurrent) {
+            ds4_gpu_close_batch_encoder();g_batch_encoder_concurrent=NO;
+            return 0;
+        }
+    }
+    int ok=1;
+    for(uint32_t i=0;ok&&i<count;i++) ok=ds4_gpu_muse_linear_tensor(out[i],map,size,
+        offsets[i],types[i],in_dim,widths[i],x,tokens);
+    if(parallel) {ds4_gpu_close_batch_encoder();g_batch_encoder_concurrent=NO;}
+    return ok;
+}
+
 int ds4_gpu_muse_input_norm_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *x,
     const void *map, uint64_t size, uint64_t weight_offset,
     uint32_t rows, uint32_t width, float eps) {

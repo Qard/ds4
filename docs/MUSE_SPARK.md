@@ -127,7 +127,7 @@ Both graph admission and session allocation use that same default.
 ```sh
 make test-muse-gguf test-muse-tokenizer
 make test-muse-chat test-muse-cli test-muse-server test-muse-agent test-muse-eval test-muse-engine
-make test-muse-metal test-muse-attention test-muse-experts test-muse-quant
+make test-muse-metal test-muse-attention test-muse-experts test-muse-quant test-muse-projections
 make test-muse-graph test-muse-session test-muse-memory
 uv run --with huggingface-hub==2.2.0 --with 'numpy>=2,<3' --with gguf==0.19.0 \
   python -m unittest discover -s tests -p 'test_muse_*.py'
@@ -862,3 +862,51 @@ The earlier normalization sweep remains documented above, including its
 no consistent decode gain across hardware conditions. They do not invalidate
 the within-run exact IQ2 pair comparison, and that paired improvement does
 not imply the standalone 10 tokens/s goal has been reached.
+
+
+Two native 256-token tests of the existing TP keep-alive worker were rejected:
+one threadgroup measured 6.47 versus 7.06 tokens/s without it, and four groups
+measured 6.56 versus 7.33. Each test compared all 58,391,872 logits and 288
+selected IDs exactly; peak RSS stayed below 79 GiB and swapouts did not
+increase. Setup and worker teardown were outside timed evaluation. A bounded
+pre-encoded shared-event handshake test also measured about the same as
+ordinary per-call submissions (0.459 versus 0.454 ms); flag arrival with event
+release was slower. These component measurements do not support adding a
+new GPU rendezvous protocol. No keep-alive inference policy is introduced.
+
+Increasing active expert-read workers from nine to eighteen measured 8.66
+versus 8.71 tokens/s over 256 native steps, with all logits and selected IDs
+exact; its paired uncertainty included no difference. Moving the same Q8
+bytes into GPU-private storage preserved every output bit but did not improve
+the largest projection. Neither experiment changes the default runtime.
+Extending causal suffix-copy analysis to all 1,056 evaluated inputs found at
+most nine saved forwards while adding 195 input rows, so that longer trace
+also does not justify speculative prefix-copy execution.
+
+
+Muse now evaluates its independent Q/K/V/gate projections in one bounded
+concurrent compute pass on M5 for one to four input rows. It reuses the
+original Q6, Q8 and F32 kernels and the existing command batch. Output/input
+alias checks allow disjoint views of one buffer, reject overlaps, and preserve
+the caller's batch after failure. The pass always closes before a dependent
+consumer. Larger batches and other devices retain serial dispatch. Set
+`DS4_METAL_MUSE_PROJECTIONS_REFERENCE=1` for the prior serial schedule.
+
+A bounded 137.5-MiB test of actual checkpoint projections measured an 8–9%
+component improvement for one to four rows with every output bit exact.
+The native saved-8K comparison then completed 32 warmup and 1024 measured
+steps per path: concurrent dispatch measured 4.8897 versus 4.7940 tokens/s,
+a 2.00% improvement with a within-run 95% block-bootstrap interval of
+1.32–2.65%. All 213,564,736 logits and 1,056 selected IDs matched bit-for-bit.
+The 440.93-second run had 23 memory samples, peak RSS 79.19 GiB and no
+increase in system swapouts. This retains a small demonstrated gain, while
+the sustained 10 tokens/s target remains unmet. The standalone CSV above
+continues to identify the earlier `ad97c58` sweep rather than mixing protocols.
+
+The new `test-muse-projections` target covers mixed quantization, irregular
+output widths, one to four projections, shared-buffer views, a dependent
+consumer, partial-failure recovery, and serial rollback. Quantization, complete
+graph, session, memory and 8193-token attention checks pass, and every native
+binary builds. Pipeline fast lookup and fixed/slab residency-set hints were
+also tested independently; their sub-1% native differences were inconclusive,
+so those policies are not changed.
