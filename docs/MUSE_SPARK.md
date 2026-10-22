@@ -1374,3 +1374,33 @@ excluding per-row output logits, drafting and rejection/correction costs.
 Causal prompt-lookup replay on the measured greedy trajectory accepted only
 67 of 1053 proposed tokens; that drafter does not justify implementing a
 production speculative path from these results.
+
+A single-session native run followed the published M5 Max benchmark's
+continued-prefill schedule: 2048-token increments and 128 greedy output tokens
+at each frontier. It stopped at 8K but reserved 65665 context tokens, matching
+the published complete 64K schedule's allocation. Muse used the optional
+combined profile, default 512-token prefill chunks and SSD streaming.
+
+| Context | Muse prefill tokens/s | Muse decode tokens/s | Published DeepSeek V4 Flash Q2 decode tokens/s |
+| --- | ---: | ---: | ---: |
+| 2048 | 38.89 | 8.56 | 39.35 |
+| 4096 | 36.41 | 7.47 | 37.50 |
+| 6144 | 29.38 | 5.50 | 37.18 |
+| 8192 | 25.62 | 5.15 | 37.03 |
+
+The DeepSeek rows are from `speed-bench/m5_max.csv`. Its published command
+does not enable MTP; its power mode, charger and chassis are not recorded.
+These are different models and quantizations, and Muse's throughput fell
+during the sequential run. Muse remained in Automatic with AC reporting
+65 W, peaked at 76.41 GiB sampled process RSS and recorded no new system
+swapouts. Its final CSV `kvcache_bytes=0` means the benchmark did not create
+a restore snapshot for the last frontier; the allocated KV was 4.46 GiB.
+
+A single-RHS instance of the existing Q8 kernel also passed all 213564736
+full-model logit-bit comparisons and 1056 selected-ID comparisons. A private
+adapter initially gained 2.09%, but the integrated version measured 7.7289
+versus the original's 7.7372 tokens/s: -0.11%, with a within-run 95% interval
+of -1.23% to +0.94%. An equal-dispatch component check using command-buffer
+GPU timestamps measured only a 1.18% kernel gain; the earlier component test
+also included unequal host dispatch overhead. The production change was
+removed because the integrated full-model gain was not reliable.
