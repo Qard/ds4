@@ -34,7 +34,7 @@ static int bench_experts(double minimum_speedup,const char *rollback,bool decode
     assert(!setenv(rollback,"1",1));
     for(unsigned warm=0;warm<3;warm++) {
         assert(ds4_gpu_begin_commands());
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,TMAX,E,S,D,F,0,lists,counts,0, false));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,TMAX,E,S,D,F,0,lists,counts,0, false, false));
         assert(ds4_gpu_end_commands());
     }
     const unsigned shapes[]={1,2,3,5,16,512};int rc=0;
@@ -42,7 +42,7 @@ static int bench_experts(double minimum_speedup,const char *rollback,bool decode
         unsigned rows=shapes[shape];if(decode_only&&rows!=1) continue;
         unsigned reps=rows==512?1:8;size_t bytes=(size_t)rows*S*D*4;double elapsed[2]={0};
         assert(!setenv(rollback,"1",1)&&ds4_gpu_begin_commands());
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts,0, false));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts,0, false, false));
         assert(ds4_gpu_end_commands()&&ds4_gpu_tensor_read(mid,0,reference_mid,bytes)&&ds4_gpu_tensor_read(part,0,reference_part,bytes));
         for(unsigned s=0;s<S;s++) for(unsigned edge=0;edge<2;edge++) {
             unsigned row=edge?D-1:0,expert=ids[s];
@@ -58,9 +58,9 @@ static int bench_experts(double minimum_speedup,const char *rollback,bool decode
         for(unsigned round=0;round<6;round++) for(unsigned order=0;order<2;order++) {
             unsigned variant=(round+order)&1;
             assert(!(variant?unsetenv(rollback):setenv(rollback,"1",1)));
-            assert(ds4_gpu_begin_commands()&&ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts,0, false)&&ds4_gpu_end_commands());
+            assert(ds4_gpu_begin_commands()&&ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts,0, false, false)&&ds4_gpu_end_commands());
             double start=now_sec();assert(ds4_gpu_begin_commands());
-            for(unsigned rep=0;rep<reps;rep++) assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts,0, false));
+            for(unsigned rep=0;rep<reps;rep++) assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,rows,E,S,D,F,0,lists,counts,0, false, false));
             assert(ds4_gpu_end_commands());elapsed[variant]+=now_sec()-start;
             assert(ds4_gpu_tensor_read(mid,0,actual,bytes));
             if(memcmp(reference_mid,actual,bytes)) {fprintf(stderr,"IQ2 mid drift rows=%u variant=%u\n",rows,variant);rc=1;goto done;}
@@ -167,7 +167,7 @@ static void test_q8_linears(void) {
     ds4_gpu_cleanup();munmap(map,bytes);free(input);free(actual);free(reference);
 }
 
-static void test_iq2_experts(unsigned T,bool matrix_policy,unsigned route_pattern) {
+static void test_iq2_experts(unsigned T,bool matrix_policy,unsigned route_pattern,bool expert_mv) {
     enum {D=256,F=256,E=4,S=2,ROW=66,BANK=E*F*ROW,SIZE=3*BANK+D*4};
     FILE *file=tmpfile();assert(file && !ftruncate(fileno(file),SIZE));
     unsigned char *map=mmap(NULL,SIZE,PROT_READ|PROT_WRITE,MAP_SHARED,fileno(file),0);
@@ -204,8 +204,15 @@ static void test_iq2_experts(unsigned T,bool matrix_policy,unsigned route_patter
         for(unsigned d=0;d<D;d++) expected[t*D+d]+=prob[t*S+s]*raw[d]*inv;
     }
     assert(ds4_gpu_init() && ds4_gpu_set_model_map(map,SIZE) && ds4_gpu_set_model_fd(fileno(file)));
-    ds4_gpu_tensor *x=ds4_gpu_tensor_alloc(sizeof(input)),*selected=ds4_gpu_tensor_alloc(sizeof(ids));
-    ds4_gpu_tensor *mid=ds4_gpu_tensor_alloc(T*S*F*4),*part=ds4_gpu_tensor_alloc(T*S*D*4);
+    uint64_t payload[4]={sizeof(input),sizeof(ids),(uint64_t)T*S*F*4,(uint64_t)T*S*D*4};
+    uint32_t guard[16];for(unsigned i=0;i<16;i++)guard[i]=0x7fc00000u;
+    ds4_gpu_tensor *roots[4],*views[4];
+    for(unsigned i=0;i<4;i++) {
+        roots[i]=ds4_gpu_tensor_alloc(payload[i]+128);assert(roots[i]);
+        assert(ds4_gpu_tensor_write(roots[i],0,guard,64)&&ds4_gpu_tensor_write(roots[i],64+payload[i],guard,64));
+        views[i]=ds4_gpu_tensor_view(roots[i],64,payload[i]);assert(views[i]);
+    }
+    ds4_gpu_tensor *x=views[0],*selected=views[1],*mid=views[2],*part=views[3];
     ds4_gpu_tensor *lists=ds4_gpu_tensor_alloc(E*T*S*4),*counts=ds4_gpu_tensor_alloc(E*4);
     assert(lists&&counts);
     ds4_gpu_tensor *weights=ds4_gpu_tensor_alloc(sizeof(prob)),*out=ds4_gpu_tensor_alloc(T*D*4);
@@ -223,17 +230,26 @@ static void test_iq2_experts(unsigned T,bool matrix_policy,unsigned route_patter
                 .gate_expert_bytes=F*ROW,.down_expert_bytes=D*ROW};
             assert(ds4_gpu_muse_prefetch_experts_tensor(&table,selected,S,0));
         }
-        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,T,E,S,D,F,0,lists,counts,0, matrix_policy));
+        assert(ds4_gpu_muse_experts_tensor(mid,part,x,selected,map,SIZE,0,BANK,2*BANK,16,16,T,E,S,D,F,0,lists,counts,0, matrix_policy, expert_mv));
         assert(ds4_gpu_muse_input_norm_tensor(part,part,map,SIZE,3*BANK,T*S,D,1e-8f));
         assert(ds4_gpu_qwen4_moe_reduce_tensor(out,part,weights,NULL,NULL,NULL,NULL,T,S,S,D,0));
         assert(ds4_gpu_end_commands());float actual[T*D];
         assert(ds4_gpu_tensor_read(out,0,actual,sizeof(actual)));double worst=0;
         for(unsigned i=0;i<T*D;i++) {double error=fabs(actual[i]-expected[i]);worst=MAX(worst,error);if(!(error<3e-5))fprintf(stderr,"IQ2 mismatch T=%u matrix=%d route_pattern=%u streamed=%u i=%u actual=%.9g expected=%.12g error=%.12g\n",T,matrix_policy,route_pattern,streamed,i,actual[i],expected[i],error);assert(error<3e-5);}
         if(streamed) assert(ds4_gpu_stream_expert_cache_current_count()<=budget);
+        for(unsigned i=0;i<4;i++) {
+            uint32_t got[16];
+            assert(ds4_gpu_tensor_read(roots[i],0,got,64)&&!memcmp(got,guard,64));
+            assert(ds4_gpu_tensor_read(roots[i],64+payload[i],got,64)&&!memcmp(got,guard,64));
+        }
+        float preserved_input[T*D];int32_t preserved_ids[T*S];
+        assert(ds4_gpu_tensor_read(x,0,preserved_input,sizeof(preserved_input))&&!memcmp(preserved_input,input,sizeof(input)));
+        assert(ds4_gpu_tensor_read(selected,0,preserved_ids,sizeof(preserved_ids))&&!memcmp(preserved_ids,ids,sizeof(ids)));
         printf("Muse IQ2_XXS %s expert parity: max error %.8g PASS\n",streamed?"SSD":"resident",worst);
     }
     ds4_gpu_tensor_free(x);ds4_gpu_tensor_free(selected);ds4_gpu_tensor_free(mid);
     ds4_gpu_tensor_free(part);ds4_gpu_tensor_free(lists);ds4_gpu_tensor_free(counts);ds4_gpu_tensor_free(weights);ds4_gpu_tensor_free(out);
+    for(unsigned i=0;i<4;i++)ds4_gpu_tensor_free(roots[i]);
     ds4_gpu_cleanup();munmap(map,SIZE);fclose(file);
 }
 
@@ -253,10 +269,12 @@ int main(int argc,char **argv) {
         }
         return bench_experts(minimum,argc==4?argv[3]:"DS4_METAL_MUSE_EXPERT_BATCH_REFERENCE",decode_only);
     }
-    test_iq2_experts(5,false,false);
-    test_iq2_experts(32,true,false);
-    test_iq2_experts(33,true,false);
-    test_iq2_experts(33,true,1);
-    test_iq2_experts(33,true,2);
+    test_iq2_experts(5,false,false,false);
+    test_iq2_experts(32,true,false,false);
+    test_iq2_experts(33,true,false,false);
+    test_iq2_experts(33,true,1,false);
+    test_iq2_experts(33,true,2,false);
+    test_iq2_experts(1,false,0,true);
+    test_iq2_experts(1,false,2,true);
     test_q8_linears();return 0;
 }

@@ -17,7 +17,7 @@ typedef struct {
     uint32_t pos, kv_highwater, swa_history_start, ctx_cap, cap_tokens, n_logit_rows;
     bool valid, cancelled;
     /* Immutable math profile for this session and its persisted KV. */
-    bool flash_attention, matmul_prefill;
+    bool flash_attention, matmul_prefill, expert_mv;
     ds4_session_cancel_fn cancel;
     void *cancel_ud;
 #define MUSE_FIELD(field,count) ds4_gpu_tensor *field;
@@ -173,7 +173,7 @@ static DS4_MAYBE_UNUSED bool muse_graph_forward(ds4_muse_gpu_graph *g,const ds4_
             ds4_gpu_muse_experts_tensor(g->mid,g->part,g->latent,g->selected,m->map,m->size,
                 l->ffn_gate_exps->abs_offset,l->ffn_up_exps->abs_offset,l->ffn_down_exps->abs_offset,
                 l->ffn_gate_exps->type,l->ffn_down_exps->type,T,DS4_N_EXPERT,DS4_N_EXPERT_USED,
-                DS4_N_MOE_LATENT,DS4_N_FF_EXP,il,g->moe_lists,g->moe_counts,routing_event, g->matmul_prefill) &&
+                DS4_N_MOE_LATENT,DS4_N_FF_EXP,il,g->moe_lists,g->moe_counts,routing_event, g->matmul_prefill, g->expert_mv) &&
             ds4_gpu_muse_input_norm_tensor(g->part,g->part,m->map,m->size,l->ffn_post_exp_norm->abs_offset,
                 T*DS4_N_EXPERT_USED,DS4_N_MOE_LATENT,g_ds4_shape.post_norm_eps) &&
             ds4_gpu_qwen4_moe_reduce_tensor(g->moe,g->part,g->weights,NULL,NULL,NULL,NULL,

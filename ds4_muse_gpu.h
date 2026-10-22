@@ -58,12 +58,15 @@ int ds4_gpu_muse_prefetch_finish(void);
 /* routing_event is zero unless this selection has been read back through
  * prefetch_experts_tensor. A current completed event permits CPU address
  * preparation while the tracked latent producer remains in flight. */
+/* expert_mv opts into the cached M5 IQ2 single-token FP32 reduction.
+ * It requires its own immutable session math identity; routing remains after
+ * expert gain/RMS. It adds neither graph scratch nor expanded weights. */
 int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     const ds4_gpu_tensor *x, const ds4_gpu_tensor *selected,
     const void *map, uint64_t size, uint64_t gate_offset, uint64_t up_offset,
     uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
     uint32_t tokens, uint32_t total, uint32_t slots, uint32_t latent,
     uint32_t ff, uint32_t layer,ds4_gpu_tensor *lists,ds4_gpu_tensor *counts,
-    uint64_t routing_event, bool matmul_prefill);
+    uint64_t routing_event, bool matmul_prefill, bool expert_mv);
 
 #endif

@@ -6,8 +6,9 @@ static unsigned observed_layers;
 #include <assert.h>
 
 int main(int argc, char **argv) {
-    assert(argc==6 || argc==7);
-    bool matrix=argc==7 && atoi(argv[6])!=0;
+    assert(argc>=6 && argc<=8);
+    bool matrix=argc>=7 && atoi(argv[6])!=0;
+    bool expert=argc==8 && atoi(argv[7])!=0;
     unsigned count=matrix?40:10, context=matrix?64:16;
     bool packed=atoi(argv[5])!=0; unsigned d=packed?256:128;
     g_ds4_shape=DS4_SHAPE_MUSE_SPARK;
@@ -35,6 +36,7 @@ int main(int argc, char **argv) {
     assert(ds4_gpu_tensor_bytes(g.logits)==(uint64_t)chunk*DS4_N_VOCAB*4);
     assert(ds4_gpu_tensor_bytes(last_graph.logits)==(uint64_t)DS4_N_VOCAB*4);
     g.matmul_prefill=last_graph.matmul_prefill=matrix;
+    g.expert_mv=last_graph.expert_mv=expert;
     FILE *out=fopen(argv[2],"wb"); assert(out);
     int ids[count];for(unsigned i=0;i<count;i++)ids[i]=1+i%30;
     float logits[count*32],first_logits[32];
@@ -62,6 +64,7 @@ int main(int argc, char **argv) {
     if(streamed) {
         ds4_gpu_set_streaming_expert_cache_budget(2);
         ds4_muse_gpu_graph failure;assert(muse_graph_alloc(&failure,16,1,1));
+        failure.expert_mv=expert;failure.matmul_prefill=matrix;
         ds4_tensor invalid=*w.layer[0].ffn_pre_exp_norm;invalid.abs_offset=m.size;
         ds4_weights broken=w;broken.layer[0].ffn_pre_exp_norm=&invalid;
         assert(!muse_graph_forward(&failure,&m,&broken,ids,1,NULL,false));
@@ -70,6 +73,7 @@ int main(int argc, char **argv) {
         muse_graph_free(&failure);
         ds4_gpu_set_streaming_expert_cache_budget(2);
         assert(muse_graph_alloc(&failure,16,1,1));
+        failure.expert_mv=expert;failure.matmul_prefill=matrix;
         invalid=*w.layer[0].ffn_gate_exps;invalid.type=UINT32_MAX;
         broken=w;broken.layer[0].ffn_gate_exps=&invalid;
         assert(!muse_graph_forward(&failure,&m,&broken,ids,1,NULL,false));
@@ -79,7 +83,8 @@ int main(int argc, char **argv) {
          * entries prove pending reads were joined on the latter failure. */
         assert(ds4_gpu_stream_expert_cache_current_count()==DS4_N_EXPERT_USED);
         muse_graph_free(&failure);
-        assert(muse_graph_alloc(&failure,16,1,1));float recovered[32];
+        assert(muse_graph_alloc(&failure,16,1,1));
+        failure.expert_mv=expert;failure.matmul_prefill=matrix;float recovered[32];
         assert(muse_graph_forward(&failure,&m,&w,ids,1,recovered,false));
         for(unsigned i=0;i<32;i++) assert(fabsf(recovered[i]-first_logits[i])<2e-5f);
         muse_graph_free(&failure);

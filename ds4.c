@@ -74665,6 +74665,8 @@ int ds4_session_create(ds4_session **out, ds4_engine *e, int ctx_size) {
         s->muse_graph.flash_attention=!e->quality && flash && !strcmp(flash,"1");
         const char *matrix=getenv("DS4_MUSE_MATMUL_PREFILL");
         s->muse_graph.matmul_prefill=!e->quality && matrix && !strcmp(matrix,"1");
+        const char *expert=getenv("DS4_MUSE_EXPERT_MV");
+        s->muse_graph.expert_mv=!e->quality && expert && !strcmp(expert,"1");
         s->muse_graph_ready=true;s->muse_allocation_bytes=bytes;
         e->muse_session_bytes+=bytes;s->prefill_cap=cap;
         s->logits=xmalloc((size_t)DS4_N_VOCAB*sizeof(float));

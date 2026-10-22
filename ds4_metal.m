@@ -472,6 +472,8 @@ static id<MTLComputePipelineState> g_moe_mul_mv_id_mxfp4_sum6_tp_full_rows_stati
 static id<MTLComputePipelineState> g_moe_mul_mv_slots6_mxfp4_pair_swiglu_pipeline;
 static id<MTLComputePipelineState> g_moe_mul_mv_slots6_mxfp4_sum6_pipeline;
 static id<MTLComputePipelineState> g_moe_mul_mv_addr_iq2_xxs_pair_swiglu_pipeline;
+static id<MTLComputePipelineState> g_muse_expert_iq2_mv_pipeline;
+static id<MTLComputePipelineState> g_muse_expert_iq2_down_pipeline;
 static id<MTLComputePipelineState> g_moe_mul_mv_addr_iq2_xxs_pipeline;
 static id<MTLComputePipelineState> g_moe_mul_mv_addr_q2_k_sum6_pipeline;
 static id<MTLComputePipelineState> g_moe_mul_mv_addr_iq2_xxs_pair_swiglu_masked_pipeline;
@@ -11667,6 +11669,8 @@ void ds4_gpu_cleanup(void) {
         g_moe_mul_mv_slots6_mxfp4_pair_swiglu_pipeline = nil;
         g_moe_mul_mv_slots6_mxfp4_sum6_pipeline = nil;
         g_moe_mul_mv_addr_iq2_xxs_pair_swiglu_pipeline = nil;
+        g_muse_expert_iq2_mv_pipeline = nil;
+        g_muse_expert_iq2_down_pipeline = nil;
         g_moe_mul_mv_addr_iq2_xxs_pipeline = nil;
         g_moe_mul_mv_addr_q2_k_sum6_pipeline = nil;
         g_moe_mul_mv_addr_iq2_xxs_pair_swiglu_masked_pipeline = nil;
@@ -51043,7 +51047,7 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
     uint64_t down_offset, uint32_t gate_type, uint32_t down_type,
     uint32_t tokens, uint32_t total, uint32_t slots, uint32_t latent,
     uint32_t ff, uint32_t layer,ds4_gpu_tensor *lists,ds4_gpu_tensor *counts,
-    uint64_t routing_event, bool matmul_prefill) {
+    uint64_t routing_event, bool matmul_prefill, bool expert_mv) {
     if (!tokens || tokens > 1048576 || !total || total > 384 || !slots ||
         slots > DS4_METAL_STREAM_EXPERT_CACHE_MAX_SELECTED || slots > total ||
         !latent || latent > 8192 || !ff || ff > 16384 || layer >= 80) return 0;
@@ -51175,6 +51179,38 @@ int ds4_gpu_muse_experts_tensor(ds4_gpu_tensor *mid, ds4_gpu_tensor *part,
                     &batch,sizeof(batch),mid_b,6,MTLSizeMake((ff+groups-1)/groups,resource_count,batch.tiles),resources,resource_count,groups)&&
                     muse_dispatch_resources_threads("kernel_muse_expert_down_iq2_batch",
                     &batch,sizeof(batch),down_b,5,MTLSizeMake((latent+groups-1)/groups,resource_count,batch.tiles),resources,resource_count,groups);
+            } else if(ok && tokens==1 && rows==1 && expert_mv &&
+                      gate_type==16 && down_type==16 && !g_quality_mode &&
+                      ds4_gpu_device_is_m5_apple_silicon()) {
+                if(!g_muse_expert_iq2_mv_pipeline)
+                    g_muse_expert_iq2_mv_pipeline=ds4_gpu_get_mul_mv_pipeline(
+                        "kernel_mul_mv_addr_iq2_xxs_pair_swiglu_unweighted_nr2_f32",4);
+                if(!g_muse_expert_iq2_down_pipeline)
+                    g_muse_expert_iq2_down_pipeline=ds4_gpu_get_mul_mv_pipeline(
+                        "kernel_mul_mv_addr_iq2_xxs_nr2_f32",8);
+                ds4_gpu_mul_mv_id_args gate_args=ds4_gpu_make_mul_mv_id_args(latent,ff,total,
+                    gate_row,gate_bytes,1,slots,1,2);
+                ds4_gpu_mul_mv_id_args down_args=ds4_gpu_make_mul_mv_id_args(ff,latent,total,
+                    down_row,down_bytes,slots,slots,1,2);
+                ds4_gpu_dsv4_moe_swiglu_weight_args act={.width=ff,.rows=slots,
+                    .gate_row_stride=ff*4ull,.up_row_stride=ff*4ull,
+                    .mid_row_stride=ff*4ull,.weight_stride=4};
+                int owned=0;id<MTLCommandBuffer> cb=ds4_gpu_command_buffer(&owned);
+                /* The fused unweighted entry ignores gate/up output and weight
+                 * arguments. Bind existing valid storage for that shared ABI;
+                 * only mid is written, and routing is still applied after norm.
+                 * No additional session buffers or expanded weights are needed. */
+                ok=cb && g_muse_expert_iq2_mv_pipeline && g_muse_expert_iq2_down_pipeline &&
+                    ds4_gpu_encode_mul_mv_addr_iq2_pair_swiglu(cb,g_muse_expert_iq2_mv_pipeline,
+                        &gate_args,&act,resources,resource_count,b[0].buf,b[1].buf,
+                        b[3].buf,b[3].off,b[4].buf,b[4].off,b[4].buf,b[4].off,
+                        b[4].buf,b[4].off,b[2].buf,b[2].off,b[2].buf,b[2].off,
+                        ds4_gpu_routed_mv_smem(16),4,false,nil,nil) &&
+                    ds4_gpu_encode_mul_mv_addr_iq2(cb,g_muse_expert_iq2_down_pipeline,
+                        &down_args,resources,resource_count,down[0].buf,down[2].buf,down[2].off,
+                        down[3].buf,down[3].off,down[1].buf,down[1].off,
+                        ds4_gpu_routed_mv_smem(16),8,false,2,nil);
+                if(ok)ok=ds4_gpu_finish_command_buffer(cb,owned,"Muse native FP32 expert MV");
             } else {
                 const char *mid_kernel=rows==1&&gate_type==16&&!getenv("DS4_METAL_MUSE_IQ2_PAIR_REFERENCE")?
                     "kernel_muse_expert_mid_iq2_pair":"kernel_muse_expert_mid";

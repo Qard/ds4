@@ -6,9 +6,10 @@
 #define DS4_MUSE_MATRIX_FLASH_PAYLOAD_TAG 0x4d555304u
 
 static uint32_t muse_payload_tag(const ds4_muse_gpu_graph *g) {
-    if (g->matmul_prefill)
-        return g->flash_attention ? DS4_MUSE_MATRIX_FLASH_PAYLOAD_TAG : DS4_MUSE_MATRIX_PAYLOAD_TAG;
-    return g->flash_attention ? DS4_MUSE_FLASH_PAYLOAD_TAG : DS4_MUSE_PAYLOAD_TAG;
+    /* Existing tags301..304 remain unchanged. Each additional captured
+     * policy occupies one bit of the offset from the reference identity. */
+    return DS4_MUSE_PAYLOAD_TAG + (g->flash_attention ? 1u : 0u) +
+        (g->matmul_prefill ? 2u : 0u) + (g->expert_mv ? 4u : 0u);
 }
 
 static uint64_t muse_payload_size(uint32_t rows, uint32_t swa_live) {

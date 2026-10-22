@@ -186,3 +186,17 @@ if __name__=='__main__':
                 assert np.isfinite(actual).all() and error<5e-5,(streamed,chunk,error)
                 assert np.array_equal(actual.argmax(axis=-1),expected.argmax(axis=-1))
                 print(f'Muse FP32 matrix graph streamed={streamed} chunk={chunk}: FP64 max error {error:.3g}',flush=True)
+
+        # The cached expert MV profile is an independent FP32 reduction. Keep
+        # the original FP64 bound and test scalar tails and cache fallbacks.
+        for matrix in (False,True):
+            count=40 if matrix else 10
+            expected=reference(weights,1+np.arange(count)%30)
+            for streamed in (0,1,2,3):
+                for chunk in ((1,3,32,40) if matrix else (1,3,10)):
+                    subprocess.run([sys.argv[1],str(model),str(output),str(streamed),str(chunk),'1',str(int(matrix)),'1'],check=True)
+                    actual=np.fromfile(output,dtype='<f4').reshape(count,32)
+                    error=np.max(np.abs(actual-expected))
+                    assert np.isfinite(actual).all() and error<5e-5,(matrix,streamed,chunk,error)
+                    assert np.array_equal(actual.argmax(axis=-1),expected.argmax(axis=-1))
+                    print(f'Muse expert MV graph matrix={matrix} streamed={streamed} chunk={chunk}: FP64 max error {error:.3g}',flush=True)

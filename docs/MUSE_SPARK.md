@@ -1116,13 +1116,33 @@ loader, address maps and resource fences. Q8 products combine 512-column FP32
 partials to retain the existing wide-dot numerical bound. The default shared
 matrix specialization and other models retain their original accumulation.
 No activation or dequantized tile is narrowed to F16, no expert weights are
-expanded, and single-token decoding retains its original matvec kernels.
+expanded, and this flag alone leaves single-token decoding on its original matvec kernels.
 Small caches, unsupported route shapes and repeated expert slots retain the
-existing grouped path. `--quality` overrides both optional profile flags.
+existing grouped path. `--quality` overrides the optional profile flags.
+
+A third optional M5 profile, `DS4_MUSE_EXPERT_MV=1`, uses the shared FP32
+IQ2 matvec reduction for cached single-token expert operations. Its fused
+unweighted SiLU epilogue keeps gate/up values in registers; routing weights
+still apply after expert gain and RMS normalization. The selected mid and
+down layouts use two rows per SIMD group with four and eight SIMD groups,
+respectively. Fixing these group counts at compile time lets the existing
+shared dot helpers optimize lookup-table staging. Their original
+function-constant specializations remain the default for other callers.
+The profile adds no graph buffers or expanded weights. Batched prefill,
+small expert caches, unsupported formats and other devices retain the
+existing path. `--quality` disables this option too.
+
+To opt into all three profiles with the standard native CLI:
+
+```sh
+DS4_MUSE_FLASH_ATTN=1 DS4_MUSE_MATMUL_PREFILL=1 DS4_MUSE_EXPERT_MV=1 \
+  ./ds4 --model ~/.ds4/models/muse-spark-open-native.gguf --metal \
+  --ssd-streaming --ctx 8192 --nothink --tokens 256 -p 'Hello'
+```
 
 The flags are independent and are captured when a session is created.
-Checkpoints distinguish reference, attention, matrix, and combined math
-profiles; cross-profile imports fail before changing existing KV or logits. Recreate a checkpoint under the selected profile. Profiles cannot
+Checkpoints distinguish all eight combinations of reference, attention,
+matrix and expert reduction profiles; cross-profile imports fail before changing existing KV or logits. Recreate a checkpoint under the selected profile. Profiles cannot
 be changed midway through a session by mutating the environment. The existing
 memory admission and shared scratch allocator remain in use; padding the last
 key tile requires at most about 2 MiB for Muse's sixteen KV heads, without
@@ -1404,3 +1424,42 @@ of -1.23% to +0.94%. An equal-dispatch component check using command-buffer
 GPU timestamps measured only a 1.18% kernel gain; the earlier component test
 also included unequal host dispatch overhead. The production change was
 removed because the integrated full-model gain was not reliable.
+
+
+The native expert profile passed the independent FP64 operator and packed-graph
+checks at the existing error bounds, including offset views, duplicate routes,
+small-cache fallbacks and input/output guards. Session tests cover all eight
+profile identities, immutable selection, quality override and rejection of a
+foreign profile before mutation. Its fresh 8K prefill retained 2,081,215,744
+identical payload-body bytes relative to the matrix/attention profile; only
+the math tag differs. A same-profile restore reproduced 404,096 initial and
+continuation logit values exactly.
+
+A 32-warmup/1024-measured native comparison against the matrix/attention profile
+measured 5.7212 versus 5.6056 tokens/s: a 2.06% steady-state gain, with a
+within-run block 95% interval of approximately 1.22–2.87%. All 1056 actual
+continuation tokens, including warmup, contributed to the quality comparison.
+Mean next-token loss changed by +0.0003902 nats (block interval -0.0017211 to
++0.0022181), or +0.0390% perplexity, with three differing greedy frontiers.
+This is one literary passage, not a general accuracy result.
+
+A separate native comparison reversed the profile/session assignment and
+included cold startup in its 1024 measured calls. It measured 7.9733 versus
+7.9119 tokens/s: +0.78%, with an interval of -0.44% to +2.06%. Its predeclared
+secondary result after the first 32 calls was +1.18% (0.04–2.36%). Each
+profile's loss exactly reproduced its earlier run despite the reversed
+assignment. A standard native `ds4-eval` high-effort AIME case also passed
+with seed 42 and a 2048-token generation budget. These checks support the
+optional profile; they do not establish broad accuracy or a sustained 10 TPS.
+
+The compile-time specialization itself was also compared with its earlier
+function-constant implementation under the same expert profile. It measured
+8.0584 versus 7.8634 tokens/s, with all 213,564,736 FP32 logit values matching bit-for-bit,
+1056 selected IDs and the entire 1,089,267,124-byte final payload identical.
+The gain survived the full model before integration. All measurements above
+used Automatic power mode and AC reporting 65 W. Large clock variation makes
+absolute rates from separate runs unsuitable for attributing the code gain.
+
+Packed sign-mask decoding and fixed-width IQ2 argument propagation were
+investigated separately. The former offered no useful exact-output gain;
+the latter preserved output bits but slowed the kernels. Neither was retained.
