@@ -1344,3 +1344,33 @@ no increase in system swapouts. Both optional flags remain disabled by default;
 Automatic power and the reported 65 W AC source were unchanged. The 10 TPS
 target remains unmet, and this paired two-session result does not establish
 the best single-session or High Power throughput.
+
+Restoring both native prefixes with the default 512-token workspace, rather
+than timing immediately after a fresh 8K prefill, measured 7.5737 versus 7.1263
+tokens/s over the same 1024 actual continuation tokens. Mean loss changed by
++0.000099 nats/token (within-run 95% interval -0.002165 to +0.002428), with five
+of 1025 greedy-frontier IDs differing. Sampled peak process RSS was 83.83 GiB,
+with no new swapouts. Automatic power and 65 W AC were unchanged. This is a
+different thermal/cache history and allocation, so the difference from the
+fresh-prefill result cannot be attributed to workspace alone. Candidate
+throughput by consecutive 256-token quarters was 9.12, 8.92, 8.24 and 5.40
+tokens/s; wall-clock-aligned GPU-frequency medians were 1348, 1012, 989 and
+412.5 MHz. These measurements still do not establish sustained 10 TPS.
+
+An IQ2 lookup-table staging experiment preserved all 213564736 compared logit
+bits and 1056 selected IDs across a complete 8K-prefix decode comparison. Its
+initial private adapter gained 1.50%, but the integrated shared-arithmetic
+version measured 7.3147 versus the original dispatch's 7.3784 tokens/s, a
+-0.86% change with a within-run 95% interval of -1.84% to +0.09%. Component
+checks passed, including actual checkpoint weights, signed zero, subnormals,
+buffer guards and input nonmutation. The gain did not survive integration;
+the dispatch and shader changes were removed from production.
+
+A separate public-session feasibility check compared four-token ingestion
+with four scalar evaluations on 1024 actual continuation tokens. It measured
+12.29 versus 7.59 tokens/s, with all 256 vocabulary frontiers and the initial
+1.02 GB saved-state comparison bit-exact. This is an ingestion upper bound,
+excluding per-row output logits, drafting and rejection/correction costs.
+Causal prompt-lookup replay on the measured greedy trajectory accepted only
+67 of 1053 proposed tokens; that drafter does not justify implementing a
+production speculative path from these results.
