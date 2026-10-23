@@ -1,0 +1,42 @@
+{
+  "candidate": "Q6 packed dot products with two or four independent FP32 accumulation chains; no input/weight/KV narrowing",
+  "reference": "Committed native308 profile on identical prefixes and heldout tokens",
+  "operator": {
+    "fp64_max_absolute_error": 0.0001,
+    "unchanged_existing_bound": true,
+    "fp64_sampled_outputs_per_shape": 256,
+    "shapes": [
+      1,
+      3,
+      33,
+      512
+    ],
+    "all_outputs_finite": true,
+    "offset_guards": true,
+    "input_nonmutation": true,
+    "batch_vs_single_row_bit_exact_within_candidate": true
+  },
+  "quality": {
+    "corpora": [
+      "Italian literary continuation",
+      "English technical prose",
+      "source code"
+    ],
+    "minimum_scored_tokens_per_corpus": 1024,
+    "include_warmup_in_quality": true,
+    "paired_mean_delta_nll_95pct_upper_max": 0.01,
+    "mean_kl_max": 0.001,
+    "max_frontier_kl": 0.05,
+    "greedy_frontier_disagreement_fraction_max": 0.01,
+    "all_logits_finite": true,
+    "task_checks": [
+      "fixed-seed arithmetic/reasoning grades",
+      "long-context retrieval",
+      "structured/tool output"
+    ],
+    "note": "Predeclared engineering promotion gates, not a claim of broad statistical task accuracy. Inspect worst frontiers and routing before promotion."
+  },
+  "performance": "Repeatable end-to-end gain beyond same-code controls and allocation-order variation; component gain alone does not qualify",
+  "state": "No private candidate payload persisted under reference identity. Production integration, if justified, gets immutable opt-in policy, distinct KV identity, and quality override.",
+  "power": "Automatic restored; charger reports100W; hardware controls separated from math trials"
+}

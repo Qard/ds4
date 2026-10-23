@@ -1,0 +1,39 @@
+{
+  "auto-before": {
+    "aggregate_decode_tps": 5.45413643304974,
+    "trajectory_sha256": "4b10a166b112599a0b22f864b7bb805a20cc7f2cd559c57662903883c726eb22",
+    "compared_fp32_values": 55159104,
+    "median_busy_gpu_mhz": 1058,
+    "validity": {
+      "valid_for_throughput": true,
+      "samples": 118,
+      "max_sample_gap_seconds": 1.043255,
+      "reason": "Uninterrupted telemetry"
+    }
+  },
+  "high": {
+    "aggregate_decode_tps": 5.889300204363318,
+    "trajectory_sha256": "4b10a166b112599a0b22f864b7bb805a20cc7f2cd559c57662903883c726eb22",
+    "compared_fp32_values": 55159104,
+    "median_busy_gpu_mhz": 663,
+    "validity": {
+      "valid_for_throughput": true,
+      "samples": 118,
+      "max_sample_gap_seconds": 1.017175,
+      "reason": "Uninterrupted telemetry"
+    }
+  },
+  "auto-after": {
+    "aggregate_decode_tps": 8.566901164949643,
+    "trajectory_sha256": "4b10a166b112599a0b22f864b7bb805a20cc7f2cd559c57662903883c726eb22",
+    "compared_fp32_values": 55159104,
+    "median_busy_gpu_mhz": 1055,
+    "validity": {
+      "valid_for_throughput": true,
+      "samples": 79,
+      "max_sample_gap_seconds": 1.014554,
+      "reason": "Uninterrupted telemetry"
+    }
+  },
+  "interpretation": "All trajectories match. Automatic-after substantially exceeds both previous modes, so this sequence does not isolate a High Power benefit or a charger-only effect."
+}
