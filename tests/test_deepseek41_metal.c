@@ -164,6 +164,25 @@ static int check_quantization(void) {
     CHECK(source && actual);
     ds4_gpu_tensor *t = upload(NULL, N * sizeof(float));
     CHECK(t);
+    /* All FP4 midpoint ties at E4M3 scales, including non-power-of-two
+     * scales where fast reciprocal division can cross a rounding boundary. */
+    const float scales[] = {0x1p-9f, 0.125f, 0.5f, 1.0f, 3.75f, 16.0f, 448.0f};
+    const float levels[] = {0, 0.5f, 1, 1.5f, 2, 3, 4, 6};
+    for (unsigned si = 0; si < sizeof(scales) / sizeof(scales[0]); si++) {
+        float ties[16] = {0};
+        ties[0] = 6.0f * scales[si];
+        for (unsigned i = 0; i < 7; i++) {
+            ties[1 + i * 2] = (levels[i] + levels[i + 1]) * 0.5f * scales[si];
+            ties[2 + i * 2] = -ties[1 + i * 2];
+        }
+        CHECK(ds4_gpu_tensor_write(t, 0, ties, sizeof(ties)));
+        CHECK(ds4_gpu_dsv41_quantize(t, 16, 1, DS4_V41_FP4_E4M3));
+        CHECK(ds4_gpu_tensor_read(t, 0, actual, sizeof(ties)));
+        for (unsigned i = 0; i < 16; i++) {
+            const float expected = bf16(nearest(ties[i] / scales[si], 1) * scales[si]);
+            CHECK(!memcmp(actual + i, &expected, sizeof(expected)));
+        }
+    }
     for (int mode = 0; mode < 4; mode++) {
         const int block = mode == DS4_V41_FP4_E4M3 ? 16 : 32;
         for (int i = 0; i < N; i++) source[i] = random_value() * (1u << ((i / block) % 4));

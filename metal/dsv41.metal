@@ -78,7 +78,22 @@ kernel void kernel_dsv41_quantize(
         const float scale = args.mode == 3u
             ? dsv4_e4m3fn_dequant(max(amax, 0.01171875f) / 6.0f)
             : dsv41_pow2_ceil(max(amax, 7.052966104933725e-38f) * (1.0f / 6.0f));
-        result = copysign(dsv4_e2m1fn_dequant(abs(value) / scale), value) * scale;
+        if (args.mode == 3u) {
+            // E4M3 scales are not powers of two. Fast reciprocal division can
+            // move an exact FP4 midpoint across its ties-to-even boundary.
+            // Compare in the original units; all midpoint * scale products
+            // are exactly representable for these FP4/E4M3 operands.
+            uint best = 0;
+            for (uint i = 1; i < 8; i++) {
+                const float midpoint = (dsv4_e2m1fn_values[i - 1] +
+                                        dsv4_e2m1fn_values[i]) * 0.5f * scale;
+                if (abs(value) > midpoint ||
+                    (abs(value) == midpoint && (i & 1u) == 0u)) best = i;
+            }
+            result = copysign(dsv4_e2m1fn_values[best], value) * scale;
+        } else {
+            result = copysign(dsv4_e2m1fn_dequant(abs(value) / scale), value) * scale;
+        }
     }
     if (valid) x[index] = dsv41_bf16(result);
 }
