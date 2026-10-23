@@ -129,13 +129,13 @@ Targets:
        about 5.6 GiB. It is not compatible with the 0731 language checkpoint.
 
   ds41f-q2
-       DeepSeek V4.1 Flash calibrated Q2, about 341 GiB on disk. Main weights
+       DeepSeek V4.1 Flash 1017 calibrated Q2, about 341 GiB on disk. Main weights
        occupy 152 GiB; Engram tables stay on disk. Metal only: use SSD streaming
        on one 128 GB Mac, tensor parallelism on two, or a larger resident Mac.
 
   ds41f-vision
-       Matching V4.1 Flash vision encoder, about 0.9 GiB. Add --vision FILE
-       to the language-model command. Does not update ./ds4flash.gguf.
+       The original V4.1 Flash vision encoder, about 0.9 GiB; not for the 1017 checkpoint.
+       Use only with the original language weights. Does not update ./ds4flash.gguf.
 
   ds41f-q4
        DeepSeek V4.1 Flash calibrated Q4, about 483 GiB on disk. Main weights
@@ -459,7 +459,7 @@ artifact_identity() {
             ;;
         "$DS41_Q2_FILE")
             expected_bytes=365713686528
-            expected_sha=1ce6a8f8806205c13330d7ca287bd198331dc5ca35ccc5d8a9a92a188a6f6f42
+            expected_sha=5296e85ff64b42ecb62c8d0c0c54e1caa07e3df8e93112f2365ebbaed62ce93a
             ;;
         "$DS41_Q4_FILE")
             expected_bytes=518596067328

@@ -56,6 +56,12 @@ are not interchangeable with it.
 | `ds41f-q2` | 341 GiB | 152 GiB |
 | `ds41f-q4` | 483 GiB | 294 GiB |
 
+`ds41f-q2` now selects the **1017** checkpoint. The Q4 and vision targets
+still select the original V4.1 checkpoint. Keep checkpoint versions matched:
+the original vision encoder and DSpark support files must not be paired with
+1017 language weights. Text inference uses the existing V4.1 native graph. See the
+[1017 setup and validation notes](DEEPSEEK41_1017.md).
+
 Both use imatrix-calibrated routed experts and include 189 GiB of Engram
 tables. Engram rows are read directly from the file as needed in every mode,
 never loaded as a resident table. Keep the GGUF on a fast local SSD.
@@ -64,7 +70,7 @@ On one 128 GB Mac, use SSD streaming. Leave the expert cache budget automatic:
 
 ```sh
 ./download_model.sh ds41f-q2
-./ds4 -m gguf/DeepSeek-V4.1-Flash-Q2.gguf \
+./ds4 -m gguf/DeepSeek-V4.1-Flash-1017-IQ2_XXS-Q2_K-imatrix.gguf \
   --ssd-streaming --ctx 32768
 ```
 
@@ -106,11 +112,13 @@ continuation test, with unchanged overall top-token agreement. See the
 [QA results](../QA_BEFORE_RELEASES.md#17-deepseek-v41-flash) for details
 and remaining differences.
 
-For images, download the matching encoder and add it to the same command:
+For images with the **original** V4.1 checkpoint, download the matching Q4
+language weights and encoder:
 
 ```sh
+./download_model.sh ds41f-q4
 ./download_model.sh ds41f-vision
-./ds4-agent -m gguf/DeepSeek-V4.1-Flash-Q2.gguf \
+./ds4-agent -m gguf/DeepSeek-V4.1-Flash-Q4.gguf \
   --ssd-streaming --vision gguf/DeepSeek-V4.1-Flash-Vision.gguf
 ```
 
